@@ -25,6 +25,7 @@ const CFG = {
   LUNCH_END:         780,  // 1:00 PM
   WEEKLY_WARN_HOURS: 28,   
   WEEKLY_HARD_HOURS: 30,   
+  DAILY_PREFERRED_HOURS: 4.5,
   DAILY_WARN_HOURS:  5.5, 
   DAILY_HARD_HOURS:  6,   
   SLOT_STEP:         30,   
@@ -90,6 +91,11 @@ function onEdit(e) {
   if (sheetName === CFG.REPORT && col === 9 && row > 2 && e.value === 'Implement') {
     applySuggestedFix(e);
   }
+
+  // 4. Term Tab Conflict Auto-Fixer
+  if (CFG.TERMS.includes(sheetName) && col === 11 && row > 2 && e.value === 'Fix Conflict') {
+    fixTermConflictTab(e, sheetName);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -123,8 +129,10 @@ function runAutoScheduler() {
     if (ts) {
       const lr = ts.getLastRow();
       if (lr >= 3) {
-        ts.getRange(3, 1, lr - 2, 10).clearContent();
-        ts.getRange(3, 4, lr - 2, 5).insertCheckboxes(); 
+        ts.getRange(3, 1, lr - 2, 12).clearContent();
+        ts.getRange(3, 4, lr - 2, 5).insertCheckboxes();
+        const actionRule = SpreadsheetApp.newDataValidation().requireValueInList(['—', 'Fix Conflict'], true).build();
+        ts.getRange(3, 11, lr - 2, 1).setDataValidation(actionRule);
       }
     }
   });
@@ -146,6 +154,7 @@ function runAutoScheduler() {
     if (!termDemands.length) return;
 
     const tBooked = {}; 
+    const tBookedMins = {};
     const cBooked = {}; 
     const outputRows = [];
 
@@ -170,6 +179,7 @@ function runAutoScheduler() {
       }
 
       if (!tBooked[teacher]) tBooked[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
+      if (!tBookedMins[teacher]) tBookedMins[teacher] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
       if (!cBooked[section]) cBooked[section] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
 
       let candidateSlots = STANDARD_SLOTS;
@@ -197,15 +207,23 @@ function runAutoScheduler() {
       }
 
       let slotsAcquired = [];
+      let rowWarnings = [];
 
-      const isFree = (day, slot) => {
+      const isFree = (day, slot, checkPreferred = true) => {
         const tConflict = tBooked[teacher][day].some(b => slot.s < b.e && slot.e > b.s);
         const cConflict = cBooked[section][day].some(b => slot.s < b.e && slot.e > b.s);
-        return !tConflict && !cConflict;
+        if (tConflict || cConflict) return false;
+
+        if (checkPreferred && !isHomeroom) {
+          const duration = slot.e - slot.s;
+          if (tBookedMins[teacher][day] + duration > CFG.DAILY_PREFERRED_HOURS * 60) return false;
+        }
+        return true;
       };
 
       const bookSlot = (day, slot) => {
         tBooked[teacher][day].push({s: slot.s, e: slot.e});
+        tBookedMins[teacher][day] += (slot.e - slot.s);
         cBooked[section][day].push({s: slot.s, e: slot.e});
         slotsAcquired.push({ day, in: slot.in, out: slot.out, s: slot.s });
         hoursLeft--;
@@ -214,7 +232,7 @@ function runAutoScheduler() {
       for (let day of prefDays) {
         if (hoursLeft <= 0) break;
         for (let slot of candidateSlots) {
-          if (isFree(day, slot)) { bookSlot(day, slot); break; }
+          if (isFree(day, slot, true)) { bookSlot(day, slot); break; }
         }
       }
 
@@ -223,7 +241,23 @@ function runAutoScheduler() {
           if (hoursLeft <= 0) break;
           if (slotsAcquired.some(s => s.day === day)) continue; 
           for (let slot of candidateSlots) {
-            if (isFree(day, slot)) { bookSlot(day, slot); break; }
+            if (isFree(day, slot, true)) { bookSlot(day, slot); break; }
+          }
+        }
+      }
+
+      // Fallback: Ignore preferred hours check
+      if (hoursLeft > 0 && !isHomeroom) {
+        for (let day of prefDays) {
+          if (hoursLeft <= 0) break;
+          for (let slot of candidateSlots) {
+            if (isFree(day, slot, false)) {
+              bookSlot(day, slot);
+              const warnStr = `⚠️ Exceeds ${CFG.DAILY_PREFERRED_HOURS}h limit`;
+              unmappedLog.push(`[${term}] Soft Warning: ${teacher} exceeded ${CFG.DAILY_PREFERRED_HOURS}h preferred limit to accommodate ${subject} (${section}).`);
+              if (!rowWarnings.includes(warnStr)) rowWarnings.push(warnStr);
+              break;
+            }
           }
         }
       }
@@ -233,13 +267,21 @@ function runAutoScheduler() {
           if (hoursLeft <= 0) break;
           for (let slot of candidateSlots) {
             if (hoursLeft <= 0) break;
-            if (isFree(day, slot)) { bookSlot(day, slot); }
+            if (isFree(day, slot, false)) {
+              bookSlot(day, slot);
+              const warnStr = `⚠️ Exceeds ${CFG.DAILY_PREFERRED_HOURS}h limit`;
+              unmappedLog.push(`[${term}] Soft Warning: ${teacher} exceeded ${CFG.DAILY_PREFERRED_HOURS}h preferred limit to accommodate ${subject} (${section}).`);
+              if (!rowWarnings.includes(warnStr)) rowWarnings.push(warnStr);
+              break;
+            }
           }
         }
       }
 
       if (hoursLeft > 0) {
+        const warnStr = `🔴 Overlap/Unmapped ${hoursLeft}h`;
         unmappedLog.push(`[${term}] ${subject} (${section}) — Mapped ${originalHours - hoursLeft}/${originalHours} hrs. Overlap detected for ${teacher}.`);
+        if (!rowWarnings.includes(warnStr)) rowWarnings.push(warnStr);
       }
 
       const grouped = {};
@@ -253,16 +295,19 @@ function runAutoScheduler() {
         if (sa.day === 5) grouped[key].f = true;
       });
 
+      const warningText = rowWarnings.join(', ');
+
       Object.values(grouped).forEach(g => {
-        outputRows.push([section, subject, teacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out]);
+        outputRows.push([section, subject, teacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out, '—', warningText]);
       });
     });
 
     const ts = ss.getSheetByName(term);
     if (ts && outputRows.length > 0) {
-      ts.getRange(3, 1, outputRows.length, 10).setValues(outputRows);
-      ts.getRange(3, 1, outputRows.length, 10).setVerticalAlignment('middle');
+      ts.getRange(3, 1, outputRows.length, 12).setValues(outputRows);
+      ts.getRange(3, 1, outputRows.length, 12).setVerticalAlignment('middle');
       ts.getRange(3, 9, outputRows.length, 2).setHorizontalAlignment('center');
+      ts.getRange(3, 12, outputRows.length, 1).setFontColor(C.warn).setFontStyle('italic');
     }
   });
 
@@ -362,6 +407,74 @@ function applySuggestedFix(e) {
   
   Utilities.sleep(500);
   runConflictChecker(); 
+}
+
+function fixTermConflictTab(e, termName) {
+  const sheet = e.range.getSheet();
+  const row = e.range.getRow();
+
+  const gradeLevel = sheet.getRange(row, 1).getValue();
+  const teacher = sheet.getRange(row, 3).getValue();
+  const timeIn = sheet.getRange(row, 9).getValue();
+  const timeOut = sheet.getRange(row, 10).getValue();
+
+  if (!teacher || !timeIn || !timeOut) {
+    e.range.setValue('—');
+    return e.source.toast('Missing required schedule data to fix conflict.', '⚠️ Error');
+  }
+
+  const start = parseTime(timeIn);
+  const end = parseTime(timeOut);
+  const durationMins = end - start;
+
+  if (durationMins <= 0) {
+    e.range.setValue('—');
+    return;
+  }
+
+  const entries = _buildTermEntries(sheet, termName);
+
+  // Find which day(s) this row is active
+  const days = ['MON','TUE','WED','THU','FRI'];
+  const activeDays = days.filter((day, di) => sheet.getRange(row, 4 + di).getValue() === true);
+
+  let fixed = false;
+
+  // Find a single slot that is free across ALL active days
+  for (let s = CFG.SCHOOL_START; s + durationMins <= CFG.SCHOOL_END; s += CFG.SLOT_STEP) {
+    const end = s + durationMins;
+    if (s < CFG.LUNCH_END && end > CFG.LUNCH_START) { s = CFG.LUNCH_END - CFG.SLOT_STEP; continue; }
+
+    let isFreeOnAllDays = true;
+    for (let day of activeDays) {
+      const byDay = entries.filter(e => e.day === day);
+      const hasConflict = byDay.some(entry =>
+        s < entry.end && end > entry.start &&
+        (entry.teacher === teacher || (entry.gradeLevel === gradeLevel && gradeLevel !== ''))
+      );
+      if (hasConflict) {
+        isFreeOnAllDays = false;
+        break;
+      }
+    }
+
+    if (isFreeOnAllDays) {
+      sheet.getRange(row, 9).setValue(formatMinsToTime(s));
+      sheet.getRange(row, 10).setValue(formatMinsToTime(end));
+      fixed = true;
+      e.source.toast(`Fixed overlap for ${teacher}.`, '✅ Fixed', 4);
+      break;
+    }
+  }
+
+  if (fixed) {
+    e.range.setValue('✔ Fixed').setBackground(C.okBg).setFontColor(C.ok).clearDataValidations();
+    Utilities.sleep(500);
+    // Refresh entries to show it worked
+  } else {
+    e.range.setValue('—');
+    e.source.toast('Could not find a valid free slot to resolve conflict. Manual fix required.', '⚠️ Failed');
+  }
 }
 
 function _buildTermEntries(src, termName) {
@@ -795,22 +908,26 @@ function buildPhase3TermTabs() {
   CFG.TERMS.forEach((term, index) => {
     let sheet = ss.getSheetByName(term) || ss.insertSheet(term, 4 + index);
     sheet.clear();
-    sheet.getRange('A1:J1').merge().setValue(`📅 ${term.toUpperCase()} MASTER SCHEDULE`).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+    sheet.getRange('A1:L1').merge().setValue(`📅 ${term.toUpperCase()} MASTER SCHEDULE`).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
     sheet.setRowHeight(1, 40);
 
-    const headers = ['GRADE Level', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out'];
-    sheet.getRange('A2:J2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+    const headers = ['GRADE Level', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out', 'Action', 'Warnings'];
+    sheet.getRange('A2:L2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
     sheet.setRowHeight(2, 30);
 
     sheet.setColumnWidth(1, 150); sheet.setColumnWidth(2, 250); sheet.setColumnWidth(3, 200); 
-    sheet.setColumnWidths(4, 5, 80); sheet.setColumnWidths(9, 2, 110); 
+    sheet.setColumnWidths(4, 5, 80); sheet.setColumnWidths(9, 2, 110); sheet.setColumnWidth(11, 120); sheet.setColumnWidth(12, 200);
 
-    sheet.getRange('A3:J1000').setFontColor(C.body).setVerticalAlignment('middle');
+    sheet.getRange('A3:L1000').setFontColor(C.body).setVerticalAlignment('middle');
     
     const cbRule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
     sheet.getRange('D3:H1000').setDataValidation(cbRule).setHorizontalAlignment('center');
     
     sheet.getRange('I3:J1000').setHorizontalAlignment('center').setNumberFormat('h:mm AM/PM');
+
+    const actionRule = SpreadsheetApp.newDataValidation().requireValueInList(['—', 'Fix Conflict'], true).build();
+    sheet.getRange('K3:K1000').setDataValidation(actionRule).setValue('—').setHorizontalAlignment('center');
+
     sheet.getRange('A3:A1000').setHorizontalAlignment('center'); 
     sheet.getRange('B3:C1000').setHorizontalAlignment('left'); 
     sheet.setFrozenRows(2);
