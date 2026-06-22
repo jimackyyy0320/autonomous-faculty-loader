@@ -15,8 +15,8 @@ const CFG = {
   SECTION_ENROLL: 'Section Enrollment',
   SUBJECT_LOAD:   'Subject Loading',
   TEACHER_ENROLL: 'Teacher Enrollment',
-  TEACHER_ASSIGN: 'Master Assignment & Schedule',
-  TERMS:          ['Term 1', 'Term 2', 'Term 3'], // Keep for dropdown options, but no longer separate tabs
+  TEACHER_ASSIGN: 'Teacher Assignment',
+  TERMS:          ['Term 1', 'Term 2', 'Term 3'],
   DASHBOARD:      'Teacher Dashboard',
   SECTION_DASH:   'Section Dashboard', // NEW
   REPORT:         'Schedule Alignment',
@@ -29,7 +29,7 @@ const CFG = {
   DAILY_WARN_HOURS:  5.5, 
   DAILY_HARD_HOURS:  6,   
   SLOT_STEP:         30,   
-  SCHOOL_START:      420,  // 7:00 AM
+  SCHOOL_START:      450,  // 7:30 AM
   SCHOOL_END:        990,  // 4:30 PM
 };
 
@@ -52,14 +52,15 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('📋 Faculty Tools')
     .addItem('1️⃣ Build: Phase 1 Data Tabs', 'buildPhase1Tabs')
-    .addItem('2️⃣ Build: Phase 2 Teacher & Master Assignment', 'buildPhase2TeacherTabs')
-    .addItem('3️⃣ Build: Phase 3 Teacher Dash', 'buildPhase4Dashboard')
+    .addItem('2️⃣ Build: Phase 2 Teacher Tabs', 'buildPhase2TeacherTabs')
+    .addItem('3️⃣ Build: Phase 3 Term Tabs', 'buildPhase3TermTabs')
+    .addItem('4️⃣ Build: Phase 4 Teacher Dash', 'buildPhase4Dashboard')
     .addItem('5️⃣ Build: Phase 5 Conflict Report', 'buildPhase5ConflictReport')
     .addItem('6️⃣ Build: Phase 6 Section Dash', 'buildPhase6SectionDashboard') // NEW
-
-    .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
+    .addItem('7️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer') // NEW VISUALIZER
     .addSeparator()
-    .addItem('🖨️ Generate Schedule PDF', 'generateScheduleUI')
+    .addItem('🚀 RUN AUTO-SCHEDULER', 'runAutoScheduler')
+    .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
     .addToUi();
 }
 
@@ -69,106 +70,72 @@ function onEdit(e) {
   const sheetName = e.range.getSheet().getName();
   const row = e.range.getRow();
   const col = e.range.getColumn();
+  // 4.5 Interactive Learning: Real-time conflict feedback on manual edits
+  if (CFG.TERMS.includes(sheetName) && row > 2 && (col === 3 || col >= 4 && col <= 10)) {
+    checkRowConflicts(e.range.getSheet(), row);
+  }
   
   // 1. Foundation Sweeps & Syncs
   if (sheetName === CFG.SECTION_ENROLL || sheetName === CFG.SUBJECT_LOAD || sheetName === CFG.TEACHER_ENROLL) {
     cleanOrphanedData();
     if (sheetName === CFG.SECTION_ENROLL) updateSectionDropdowns();
-    if (sheetName === CFG.SUBJECT_LOAD) syncSubjectsToAssignment(); // Auto-sync
+    if (sheetName === CFG.SUBJECT_LOAD) updateTeacherDropdownOptions();
     if (sheetName === CFG.TEACHER_ENROLL) updateTeacherNameDropdowns(); 
   }
 
   // 2. Dashboards Live Filter (Both Teacher and Section)
-  if (sheetName === CFG.SECTION_DASH && col === 2 && row >= 2 && row <= 4) {
+  if ((sheetName === CFG.DASHBOARD || sheetName === CFG.SECTION_DASH) && col === 2 && row >= 2 && row <= 4) {
     const sheet = e.range.getSheet();
     if (row === 3) { e.value === 'ALL WEEK' ? sheet.showColumns(5, 5) : sheet.hideColumns(5, 5); }
-    updateSectionDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
-  }
 
-  if (sheetName === CFG.DASHBOARD && (col === 2 || col === 12) && row >= 2 && row <= 4) {
-    const sheet = e.range.getSheet();
-    if (row === 3) {
-      if (col === 2) { e.value === 'ALL WEEK' ? sheet.showColumns(5, 5) : sheet.hideColumns(5, 5); }
-      if (col === 12) { e.value === 'ALL WEEK' ? sheet.showColumns(15, 5) : sheet.hideColumns(15, 5); }
-    }
-    updateDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet(), col === 2 ? 1 : 2);
+    if (sheetName === CFG.DASHBOARD) updateDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
+    if (sheetName === CFG.SECTION_DASH) updateSectionDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
   }
 
   // 3. Conflict 1-Click "Implement" Auto-Fixer
   if (sheetName === CFG.REPORT && col === 9 && row > 2 && e.value === 'Implement') {
     applySuggestedFix(e);
   }
-
-  // 4. Just-In-Time Scheduler
-  if (sheetName === CFG.TEACHER_ASSIGN && col === 6 && row > 2) {
-    plotJITSchedule(e.range.getSheet(), row, e.value);
-  }
-
-  // 4.5 Term Tab Conflict Auto-Fixer
-  if (sheetName === CFG.TEACHER_ASSIGN && col === 15 && row > 2 && e.value === 'Fix Conflict') {
-    fixTermConflictTab(e);
-  }
 }
 
+// ══════════════════════════════════════════════════════════════
+//  SECTION 3: AUTO-SCHEDULER (The Super-Advanced Brain)
+// ══════════════════════════════════════════════════════════════
 
-// ══════════════════════════════════════════════════════════════
-//  SECTION 3: JUST-IN-TIME (JIT) SCHEDULER
-// ══════════════════════════════════════════════════════════════
-function plotJITSchedule(sheet, rowNum, teacher) {
-  if (!teacher) {
-    // Only clear content and background, DO NOT clearDataValidations so checkboxes stay intact
-    sheet.getRange(rowNum, 7, 1, 5).setValue(false).setBackground(C.white); // Checkboxes
-    sheet.getRange(rowNum, 12, 1, 2).clearContent().setBackground(C.white); // Time In/Out
-    sheet.getRange(rowNum, 14).setValue('⚪ Pending Assignment').setBackground(C.white).setFontColor(C.muted);
-    return;
+function runAutoScheduler() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
+  const assignSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
+  
+  if (!subSheet || !assignSheet) {
+    return ss.toast('Please ensure your Subject Loading and Teacher Assignment tabs are set up first.', '👋 Just a quick note', 5);
   }
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const term = sheet.getRange(rowNum, 1).getValue();
-  const section = sheet.getRange(rowNum, 2).getValue();
-  const subject = sheet.getRange(rowNum, 3).getValue().toString();
-  const hoursReq = parseFloat(sheet.getRange(rowNum, 4).getValue()) || 0;
-  
-  if (!term || !section || !subject || hoursReq <= 0) return;
+  ss.toast('Running advanced multi-pass algorithm with bottleneck detection...', '🧠 Computing', 4);
 
-  const data = sheet.getRange(3, 1, Math.max(1, sheet.getLastRow() - 2), 13).getValues();
+  const getSafeData = (sheet, numCols) => {
+    const lr = sheet.getLastRow();
+    return lr < 3 ? [] : sheet.getRange(3, 1, lr - 2, numCols).getValues();
+  };
 
-  const cBooked = { 1:[], 2:[], 3:[], 4:[], 5:[] };
-  const tBooked = { 1:[], 2:[], 3:[], 4:[], 5:[] };
-  const tBookedMins = { 1:0, 2:0, 3:0, 4:0, 5:0 };
-  let daysUsedForSubject = new Set();
+  const demands = getSafeData(subSheet, 4).filter(r => r[0] && r[1] && r[2]);
+  const assignments = getSafeData(assignSheet, 3).filter(r => r[0]);
 
-  data.forEach((r, idx) => {
-    if (idx === rowNum - 3) return; // Skip self
-    if (r[0] !== term) return; // Only process same term
+  const assignMap = {};
+  assignments.forEach(a => assignMap[`${a[1].toString().trim()}|${a[2].toString().trim()}`] = a[0]);
 
-    const rSec = r[1], rSub = r[2].toString(), rTeach = r[5];
-    const sTime = parseTime(r[11]), eTime = parseTime(r[12]);
-    if (sTime >= eTime) return;
-
-    [1,2,3,4,5].forEach(d => {
-      if (r[5+d] === true) {
-        if (rSec === section) cBooked[d].push({s: sTime, e: eTime});
-        if (rTeach === teacher) {
-          tBooked[d].push({s: sTime, e: eTime});
-          tBookedMins[d] += (eTime - sTime);
-        }
-        if (rSec === section && rSub === subject) daysUsedForSubject.add(d);
+  CFG.TERMS.forEach(term => {
+    const ts = ss.getSheetByName(term);
+    if (ts) {
+      const lr = ts.getLastRow();
+      if (lr >= 3) {
+        ts.getRange(3, 1, lr - 2, 10).clearContent();
+        ts.getRange(3, 4, lr - 2, 5).insertCheckboxes();
       }
-    });
+    }
   });
 
-  const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
-  const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
-
-  let candidateSlots = grade >= 11 ? [
-    { in: '7:30 AM',  out: '8:30 AM',  s: 450, e: 510 },
-    { in: '8:30 AM',  out: '9:30 AM',  s: 510, e: 570 },
-    { in: '9:45 AM',  out: '10:45 AM', s: 585, e: 645 },
-    { in: '10:45 AM', out: '11:45 AM', s: 645, e: 705 },
-    { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
-    { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
-  ] : [
+  const STANDARD_SLOTS = [
     { in: '7:30 AM',  out: '8:30 AM',  s: 450, e: 510 },
     { in: '8:30 AM',  out: '9:30 AM',  s: 510, e: 570 },
     { in: '9:45 AM',  out: '10:45 AM', s: 585, e: 645 },
@@ -178,237 +145,144 @@ function plotJITSchedule(sheet, rowNum, teacher) {
     { in: '3:00 PM',  out: '4:00 PM',  s: 900, e: 960 }
   ];
 
-  const isPhilGov = subject.toLowerCase().includes('phil gov') || subject.toLowerCase().includes('philippine politics');
-  if (isPhilGov) {
-    candidateSlots = [
-      { in: '7:30 AM',  out: '9:00 AM',  s: 450, e: 540 },
-      { in: '9:00 AM',  out: '10:30 AM', s: 540, e: 630 },
-      { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
-      { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
-    ];
-  }
+  let unmappedLog = [];
 
-  let prefDays = [1,2,3,4,5];
-  const isHomeroom = subject.toLowerCase().includes('homeroom');
-  const isAralEnd = subject.match(/\bARAL\b/i) && !subject.toLowerCase().includes('panlipunan');
+  CFG.TERMS.forEach(term => {
+    const termDemands = demands.filter(d => d[0] === term);
+    if (!termDemands.length) return;
 
-  if (isAralEnd) candidateSlots = [{ in: '3:00 PM',  out: '4:00 PM',  s: 900, e: 960 }];
+    const tBooked = {};
+    const cBooked = {};
+    const outputRows = [];
 
-  if (isHomeroom) {
-    prefDays = [1];
-    if (grade >= 11) candidateSlots = [{ in: '3:30 PM', out: '4:30 PM', s: 930, e: 990 }, { in: '3:00 PM', out: '4:00 PM', s: 900, e: 960 }];
-    else candidateSlots = [{ in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 }];
-  } else {
-    if (isPhilGov && hoursReq === 3) prefDays = [2, 4];
-    else if (hoursReq === 4) prefDays = [1,2,4,5];
-    else if (hoursReq === 3) prefDays = [1,3,5];
-    else if (hoursReq === 2) prefDays = [2,4];
-    else if (hoursReq === 1) prefDays = [3];
-  }
+    // Prioritize Homerooms, then heaviest hours
+    termDemands.sort((a, b) => {
+      const isAHomeroom = a[2].toString().toLowerCase().includes('homeroom') ? 1 : 0;
+      const isBHomeroom = b[2].toString().toLowerCase().includes('homeroom') ? 1 : 0;
+      if (isAHomeroom !== isBHomeroom) return isBHomeroom - isAHomeroom;
+      return (parseFloat(b[3]) || 0) - (parseFloat(a[3]) || 0);
+    });
 
-  let slotsAcquired = [];
-  let hoursLeft = hoursReq;
+    termDemands.forEach(d => {
+      const section = d[1].toString().trim();
+      const subject = d[2].toString().trim();
+      let hoursLeft = Math.round(parseFloat(d[3]) || 0);
+      const originalHours = hoursLeft;
 
-  const isFree = (day, slot, checkPreferred = true) => {
-    const cConf = cBooked[day].some(b => slot.s < b.e && slot.e > b.s);
-    const tConf = tBooked[day].some(b => slot.s < b.e && slot.e > b.s);
-    if (cConf || tConf) return false;
+      const teacher = assignMap[`${subject}|${section}`] || '⚠️ Unassigned';
+      if (teacher === '⚠️ Unassigned') {
+        unmappedLog.push(`[${term}] ${subject} (${section}): No teacher assigned.`);
+        return;
+      }
 
-    if (!isHomeroom) {
-      const isMorning = slot.s < 720;
-      let halfDayMins = 0;
-      tBooked[day].forEach(b => {
-          if (isMorning && b.s < 720) halfDayMins += (b.e - b.s);
-          else if (!isMorning && b.s >= 720) halfDayMins += (b.e - b.s);
-      });
-      if (checkPreferred && halfDayMins + (slot.e - slot.s) > 3 * 60) return false;
+      if (!tBooked[teacher]) tBooked[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
+      if (!cBooked[section]) cBooked[section] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
 
-      if (checkPreferred) {
-         if (tBookedMins[day] + (slot.e - slot.s) > CFG.DAILY_PREFERRED_HOURS * 60) return false;
+      let candidateSlots = STANDARD_SLOTS;
+      let prefDays = [1,2,3,4,5];
+      const isHomeroom = subject.toLowerCase().includes('homeroom');
+
+      if (isHomeroom) {
+        prefDays = [1];
+        const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
+        const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
+
+        if (grade >= 11) {
+          candidateSlots = [
+            { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 },
+            { in: '3:00 PM', out: '4:00 PM', s: 900, e: 960 }
+          ];
+        } else {
+          candidateSlots = [ { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 } ];
+        }
       } else {
-         if (tBookedMins[day] + (slot.e - slot.s) > CFG.DAILY_HARD_HOURS * 60) return false;
+        if (hoursLeft === 4) prefDays = [1,2,4,5];
+        if (hoursLeft === 3) prefDays = [1,3,5];
+        if (hoursLeft === 2) prefDays = [2,4];
+        if (hoursLeft === 1) prefDays = [3];
       }
-    }
-    return true;
-  };
 
-  const bookSlot = (day, slot) => {
-    let dur = (slot.e - slot.s) / 60;
-    let actualE = slot.e;
-    let actualOut = slot.out;
-    if (hoursLeft < dur) {
-        actualE = slot.s + Math.round(hoursLeft * 60);
-        actualOut = formatMinsToTime(actualE);
-        dur = hoursLeft;
-    }
+      let slotsAcquired = [];
 
-    cBooked[day].push({s: slot.s, e: actualE});
-    tBooked[day].push({s: slot.s, e: actualE});
-    tBookedMins[day] += (actualE - slot.s);
-    slotsAcquired.push({ day, in: slot.in, out: actualOut, s: slot.s, e: actualE });
-    hoursLeft -= dur;
-    daysUsedForSubject.add(day);
-  };
+      const isFree = (day, slot) => {
+        const tConflict = tBooked[teacher][day].some(b => slot.s < b.e && slot.e > b.s);
+        const cConflict = cBooked[section][day].some(b => slot.s < b.e && slot.e > b.s);
+        return !tConflict && !cConflict;
+      };
 
-    // 🧠 ADVANCED HUMANIZED HEURISTIC ALGORITHM (Professional Teacher Brain)
-  // Instead of blindly picking the first free slot, we score all possible valid slots to find the most considerate assignment.
+      const bookSlot = (day, slot) => {
+        tBooked[teacher][day].push({s: slot.s, e: slot.e});
+        cBooked[section][day].push({s: slot.s, e: slot.e});
+        slotsAcquired.push({ day, in: slot.in, out: slot.out, s: slot.s });
+        hoursLeft--;
+      };
 
-  const scoreSlot = (day, slot) => {
-    let score = 100;
+      for (let day of prefDays) {
+        if (hoursLeft <= 0) break;
+        for (let slot of candidateSlots) {
+          if (isFree(day, slot)) { bookSlot(day, slot); break; }
+        }
+      }
 
-    // Heuristic 1: Load Balancing across the week.
-    // Penalize days where the teacher already has a high load, preferring to distribute classes evenly.
-    score -= (tBookedMins[day] / 60) * 10;
-
-    // Heuristic 2: Gap Minimization / Contiguity.
-    // Teachers hate "dead hours" (e.g., teaching 7:30 AM, then nothing until 3 PM).
-    // We reward slots that are adjacent to their existing classes on that day.
-    let isAdjacent = false;
-    let gapPenalty = 0;
-
-    if (tBooked[day].length > 0) {
-      tBooked[day].forEach(b => {
-        if (b.e === slot.s || b.s === slot.e) isAdjacent = true; // Perfect back-to-back
-        else {
-          // Calculate gap size
-          let gap = 0;
-          if (slot.e <= b.s) gap = b.s - slot.e;
-          if (slot.s >= b.e) gap = slot.s - b.e;
-          // Ignore the lunch block (11:45 to 1:00) as a negative gap
-          if (gap > 0 && !(slot.e <= CFG.LUNCH_START && b.s >= CFG.LUNCH_END)) {
-             gapPenalty += (gap / 30); // 1 point penalty for every 30 mins of dead air
+      if (hoursLeft > 0 && !isHomeroom) {
+        for (let day of [1,2,3,4,5]) {
+          if (hoursLeft <= 0) break;
+          if (slotsAcquired.some(s => s.day === day)) continue;
+          for (let slot of candidateSlots) {
+            if (isFree(day, slot)) { bookSlot(day, slot); break; }
           }
         }
+      }
+
+      if (hoursLeft > 0 && !isHomeroom) {
+        for (let day of [1,2,3,4,5]) {
+          if (hoursLeft <= 0) break;
+          for (let slot of candidateSlots) {
+            if (hoursLeft <= 0) break;
+            if (isFree(day, slot)) { bookSlot(day, slot); }
+          }
+        }
+      }
+
+      if (hoursLeft > 0) {
+        unmappedLog.push(`[${term}] ${subject} (${section}) — Mapped ${originalHours - hoursLeft}/${originalHours} hrs. Overlap detected for ${teacher}.`);
+      }
+
+      const grouped = {};
+      slotsAcquired.forEach(sa => {
+        const key = sa.in + '|' + sa.out;
+        if (!grouped[key]) grouped[key] = { m:false, t:false, w:false, th:false, f:false, in: sa.in, out: sa.out };
+        if (sa.day === 1) grouped[key].m = true;
+        if (sa.day === 2) grouped[key].t = true;
+        if (sa.day === 3) grouped[key].w = true;
+        if (sa.day === 4) grouped[key].th = true;
+        if (sa.day === 5) grouped[key].f = true;
       });
-      if (isAdjacent) score += 20; // Big bonus for back-to-back
-      score -= gapPenalty;
-    } else {
-      // If day is entirely empty, small penalty to avoid forcing them to come to school for just 1 hour
-      // unless they are already coming in on other days.
-      score -= 5;
+
+      Object.values(grouped).forEach(g => {
+        outputRows.push([section, subject, teacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out]);
+      });
+    });
+
+    const ts = ss.getSheetByName(term);
+    if (ts && outputRows.length > 0) {
+      ts.getRange(3, 1, outputRows.length, 10).setValues(outputRows);
+      ts.getRange(3, 1, outputRows.length, 10).setVerticalAlignment('middle');
+      ts.getRange(3, 9, outputRows.length, 2).setHorizontalAlignment('center');
     }
-
-    return score;
-  };
-
-  const findBestSlot = (dayPool, fallback = false) => {
-    let bestSlot = null;
-    let bestDay = null;
-    let bestScore = -Infinity;
-
-    for (let day of dayPool) {
-      if (daysUsedForSubject.has(day) && !isHomeroom) continue; // STRICT: No consecutive same-subject per day
-
-      for (let slot of candidateSlots) {
-        if (isFree(day, slot, !fallback)) {
-          let currentScore = scoreSlot(day, slot);
-          if (currentScore > bestScore) {
-            bestScore = currentScore;
-            bestSlot = slot;
-            bestDay = day;
-          }
-        }
-      }
-    }
-    return { bestDay, bestSlot };
-  };
-
-  // Pass 1: Strict constraints on Preferred Days
-  while (hoursLeft > 0) {
-    let { bestDay, bestSlot } = findBestSlot(prefDays, false);
-    if (bestSlot) {
-      bookSlot(bestDay, bestSlot);
-    } else {
-      break; // No more preferred slots
-    }
-  }
-
-  // Pass 2: Strict constraints on ANY Day
-  while (hoursLeft > 0 && !isHomeroom) {
-    let { bestDay, bestSlot } = findBestSlot([1,2,3,4,5], false);
-    if (bestSlot) {
-      bookSlot(bestDay, bestSlot);
-    } else {
-      break;
-    }
-  }
-
-  // Pass 3: Soft constraints on Preferred Days (Ignore preferred hour limit, but obey 6h max)
-  while (hoursLeft > 0 && !isHomeroom) {
-    let { bestDay, bestSlot } = findBestSlot(prefDays, true);
-    if (bestSlot) {
-      bookSlot(bestDay, bestSlot);
-    } else {
-      break;
-    }
-  }
-
-  // Pass 4: Soft constraints on ANY Day (Ignore preferred hour limit)
-  while (hoursLeft > 0 && !isHomeroom) {
-    let { bestDay, bestSlot } = findBestSlot([1,2,3,4,5], true);
-    if (bestSlot) {
-      bookSlot(bestDay, bestSlot);
-    } else {
-      break;
-    }
-  }
-
-  if (slotsAcquired.length === 0) {
-    sheet.getRange(rowNum, 14).setValue('🔴 Overlap / Unmapped (Physically Full)').setBackground(C.errorBg).setFontColor(C.error);
-    return ss.toast('Could not find free slots. Manual override needed.', '⚠️ Conflict');
-  }
-
-  // We group identical time slots to output them in the same row
-  const grouped = {};
-  slotsAcquired.forEach(sa => {
-    const key = sa.in + '|' + sa.out;
-    if (!grouped[key]) grouped[key] = { m:false, t:false, w:false, th:false, f:false, in: sa.in, out: sa.out };
-    if (sa.day === 1) grouped[key].m = true;
-    if (sa.day === 2) grouped[key].t = true;
-    if (sa.day === 3) grouped[key].w = true;
-    if (sa.day === 4) grouped[key].th = true;
-    if (sa.day === 5) grouped[key].f = true;
   });
 
-  const groups = Object.values(grouped);
-
-  // Write the first group to the current row
-  const first = groups.shift();
-  sheet.getRange(rowNum, 7, 1, 7).setValues([[first.m, first.t, first.w, first.th, first.f, first.in, first.out]]);
-
-  let newRowsInserted = 0;
-  // If there are more groups (different times), insert rows below
-  if (groups.length > 0) {
-    sheet.insertRowsAfter(rowNum, groups.length);
-    newRowsInserted = groups.length;
-    groups.forEach((g, i) => {
-      const nr = rowNum + 1 + i;
-      sheet.getRange(nr, 1, 1, 15).setValues([[term, section, subject, 0, sheet.getRange(rowNum, 5).getValue(), teacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out, '', '—']]);
-      // set validations for the new row
-      sheet.getRange(nr, 7, 1, 5).setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
-      sheet.getRange(nr, 12, 1, 2).setNumberFormat('h:mm AM/PM');
-    });
-  }
-
-  // Run Conflict Checker visually
-  checkTeacherConflicts(sheet, teacher, rowNum);
-
-  if (newRowsInserted > 0) {
-    // If we inserted rows, we should probably check conflicts for them too
-    for (let i = 0; i < newRowsInserted; i++) {
-        checkTeacherConflicts(sheet, teacher, rowNum + 1 + i);
-    }
-  }
-
-  if (hoursLeft > 0) {
-    ss.toast(`Could not fully map ${hoursLeft}h due to constraints.`, '⚠️ Warning', 5);
+  if (unmappedLog.length > 0) {
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(
+      '⚠️ Scheduling Bottleneck Detected',
+      'The engine could not find free time for the following requirements:\n\n' + unmappedLog.join('\n\n') + '\n\nThis usually means a Teacher or Section is assigned more hours than the physical timetable allows.',
+      ui.ButtonSet.OK
+    );
   } else {
-    ss.toast('Successfully mapped to Teacher schedule.', '✅ Done');
+    ss.toast('Schedules are completely mapped out and optimized!', '✅ All Set', 6);
   }
 }
-
-
-
 
 // ══════════════════════════════════════════════════════════════
 //  SECTION 4: CONFLICT CHECKER ENGINE & AUTO-FIXER
@@ -428,11 +302,10 @@ function runConflictChecker() {
 
   let allConflicts = [];
 
-  const masterSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
-  if (!masterSheet) return;
-
   CFG.TERMS.forEach(termName => {
-    const entries = _buildTermEntries(masterSheet, termName);
+    const termSheet = ss.getSheetByName(termName);
+    if (!termSheet) return;
+    const entries = _buildTermEntries(termSheet, termName);
     const conflicts = _detectConflicts(entries, termName);
     allConflicts = allConflicts.concat(conflicts);
   });
@@ -484,11 +357,11 @@ function applySuggestedFix(e) {
   if (!payload) return;
   
   const [termName, srcRow, newIn, newOut] = payload.split('|');
-  const srcSheet = e.source.getSheetByName(CFG.TEACHER_ASSIGN);
+  const srcSheet = e.source.getSheetByName(termName);
   if (!srcSheet) return;
   
-  srcSheet.getRange(parseInt(srcRow, 10), 12).setValue(newIn); // Col L
-  srcSheet.getRange(parseInt(srcRow, 10), 13).setValue(newOut); // Col M
+  srcSheet.getRange(parseInt(srcRow, 10), 9).setValue(newIn);
+  srcSheet.getRange(parseInt(srcRow, 10), 10).setValue(newOut);
   
   e.range.setValue('✔ Fixed').setBackground(C.okBg).setFontColor(C.ok).clearDataValidations();
   e.source.toast(`Schedule updated in ${termName}. Re-running scan...`, '✅ Applied', 4);
@@ -497,164 +370,14 @@ function applySuggestedFix(e) {
   runConflictChecker(); 
 }
 
-
-// ══════════════════════════════════════════════════════════════
-//  SECTION 4.5: REAL-TIME CONFLICT CHECKER
-// ══════════════════════════════════════════════════════════════
-function checkTeacherConflicts(sheet, teacherName, targetRow) {
-  if (!teacherName) {
-    sheet.getRange(targetRow, 14).setValue('⚪ Pending Assignment').setBackground(C.white).setFontColor(C.muted);
-    return;
-  }
-
-  const lastRow = sheet.getLastRow();
-  const data = sheet.getRange(3, 1, lastRow - 2, 13).getValues();
-
-  // Find target row data
-  const targetData = data[targetRow - 3];
-  const targetDays = [6, 7, 8, 9, 10].filter(d => targetData[d] === true).map(d => ['MON','TUE','WED','THU','FRI'][d-6]);
-  const targetStart = parseTime(targetData[11]);
-  const targetEnd = parseTime(targetData[12]);
-
-  let overlaps = [];
-  let dailyHours = { 'MON': 0, 'TUE': 0, 'WED': 0, 'THU': 0, 'FRI': 0 };
-  let straightHours = { 'MON': { am: 0, pm: 0 }, 'TUE': { am: 0, pm: 0 }, 'WED': { am: 0, pm: 0 }, 'THU': { am: 0, pm: 0 }, 'FRI': { am: 0, pm: 0 } };
-
-  data.forEach((row, idx) => {
-    if (row[5] !== teacherName) return; // Assigned Teacher is col F (5)
-
-    const start = parseTime(row[11]);
-    const end = parseTime(row[12]);
-    if (start >= end) return;
-
-    const dur = calcEffectiveDuration(start, end);
-    const activeDays = [6, 7, 8, 9, 10].filter(d => row[d] === true).map(d => ['MON','TUE','WED','THU','FRI'][d-6]);
-
-    activeDays.forEach(day => {
-      dailyHours[day] += dur;
-      if (start < 720) straightHours[day].am += dur; else straightHours[day].pm += dur;
-    });
-
-    if (idx !== (targetRow - 3)) {
-      const dayOverlap = targetDays.some(d => activeDays.includes(d));
-      if (dayOverlap && Math.max(targetStart, start) < Math.min(targetEnd, end)) {
-        overlaps.push(`Overlaps ${row[1]} ${row[2]}`);
-      }
-    }
-  });
-
-  // Calculate warnings
-  let warnings = [];
-  if (overlaps.length > 0) warnings.push('🔴 ' + overlaps[0]); // Show first overlap
-
-  targetDays.forEach(day => {
-    if (dailyHours[day] / 60 > CFG.DAILY_HARD_HOURS) warnings.push(`🔴 Over 6h limit (${day})`);
-    else if (dailyHours[day] / 60 > CFG.DAILY_PREFERRED_HOURS) warnings.push(`🟠 Over 5.5h (${day})`);
-
-    if (straightHours[day].am / 60 > 3) warnings.push(`🟠 >3h straight AM (${day})`);
-    if (straightHours[day].pm / 60 > 3) warnings.push(`🟠 >3h straight PM (${day})`);
-  });
-
-  const statusCell = sheet.getRange(targetRow, 14);
-
-  if (warnings.length > 0) {
-    // Dedup warnings
-    warnings = [...new Set(warnings)];
-    const hasError = warnings.some(w => w.includes('🔴'));
-    statusCell.setValue(warnings.join(', '))
-              .setBackground(hasError ? C.errorBg : C.warnBg)
-              .setFontColor(hasError ? C.error : C.warn);
-  } else {
-    statusCell.setValue('✅ Valid Schedule')
-              .setBackground(C.okBg)
-              .setFontColor(C.ok);
-  }
-}
-
-function fixTermConflictTab(e) {
-  const sheet = e.range.getSheet();
-  const row = e.range.getRow();
-
-  const termName = sheet.getRange(row, 1).getValue();
-  const sectionName = sheet.getRange(row, 2).getValue();
-  const teacher = sheet.getRange(row, 6).getValue(); // Assigned Teacher is Col F (6)
-  const timeIn = sheet.getRange(row, 12).getValue(); // Time In is Col L (12)
-  const timeOut = sheet.getRange(row, 13).getValue(); // Time Out is Col M (13)
-
-  if (!teacher) {
-    e.range.setValue('—');
-    return e.source.toast('Please assign a teacher before attempting to auto-fix conflicts.', '⚠️ Missing Data');
-  }
-
-  if (!teacher || !timeIn || !timeOut) {
-    e.range.setValue('—');
-    return e.source.toast('Missing required schedule data to fix conflict.', '⚠️ Error');
-  }
-
-  const start = parseTime(timeIn);
-  const end = parseTime(timeOut);
-  const durationMins = end - start;
-
-  if (durationMins <= 0) {
-    e.range.setValue('—');
-    return;
-  }
-
-  const entries = _buildTermEntries(sheet, termName);
-
-  // Find which day(s) this row is active
-  const days = ['MON','TUE','WED','THU','FRI'];
-  const activeDays = days.filter((day, di) => sheet.getRange(row, 7 + di).getValue() === true);
-
-  let fixed = false;
-
-  // Find a single slot that is free across ALL active days
-  for (let s = CFG.SCHOOL_START; s + durationMins <= CFG.SCHOOL_END; s += CFG.SLOT_STEP) {
-    const end = s + durationMins;
-    if (s < CFG.LUNCH_END && end > CFG.LUNCH_START) { s = CFG.LUNCH_END - CFG.SLOT_STEP; continue; }
-
-    let isFreeOnAllDays = true;
-    for (let day of activeDays) {
-      const byDay = entries.filter(e => e.day === day);
-      const hasConflict = byDay.some(entry =>
-        s < entry.end && end > entry.start &&
-        (entry.teacher === teacher || entry.gradeLevel === sectionName) // using gradeLevel map which is Section in new _buildTermEntries
-      );
-      if (hasConflict) {
-        isFreeOnAllDays = false;
-        break;
-      }
-    }
-
-    if (isFreeOnAllDays) {
-      sheet.getRange(row, 12).setValue(formatMinsToTime(s));
-      sheet.getRange(row, 13).setValue(formatMinsToTime(end));
-      fixed = true;
-      e.source.toast(`Fixed overlap for ${teacher}.`, '✅ Fixed', 4);
-      checkTeacherConflicts(sheet, teacher, row); // Update live status
-      break;
-    }
-  }
-
-  if (fixed) {
-    e.range.setValue('✔ Fixed').setBackground(C.okBg).setFontColor(C.ok).clearDataValidations();
-    Utilities.sleep(500);
-    // Refresh entries to show it worked
-  } else {
-    e.range.setValue('—');
-    e.source.toast('Could not find a valid free slot to resolve conflict. Manual fix required.', '⚠️ Failed');
-  }
-}
-
 function _buildTermEntries(src, termName) {
   const last = src.getLastRow();
   if (last < 3) return [];
-  const rows = src.getRange(3, 1, last - 2, 13).getValues();
+  const rows = src.getRange(3, 1, last - 2, 10).getValues();
   
   return rows.flatMap((row, idx) => {
-    if (row[0] !== termName) return [];
-    const gradeLevel = row[1], subject = row[2], teacher = row[5];
-    const timeIn = row[11], timeOut = row[12];
+    const gradeLevel = row[0], subject = row[1], teacher = row[2];
+    const timeIn = row[8], timeOut = row[9];
     if (!teacher || !timeIn || !timeOut) return [];
 
     const start = parseTime(timeIn);
@@ -663,7 +386,7 @@ function _buildTermEntries(src, termName) {
 
     const days = ['MON','TUE','WED','THU','FRI'];
     return days.map((day, di) => ({ day, di }))
-      .filter(({ di }) => row[6 + di] === true)
+      .filter(({ di }) => row[3 + di] === true)
       .map(({ day }) => ({
         term: termName, rowNum: idx + 3,
         teacher, subject, gradeLevel, day, start, end,
@@ -762,53 +485,135 @@ function _makeConflict(a, b, type, severity, slot) {
   ]};
 }
 
+
+// ══════════════════════════════════════════════════════════════
+//  SECTION 4.5: INTERACTIVE LEARNING & REAL-TIME CONFLICTS
+// ══════════════════════════════════════════════════════════════
+function checkRowConflicts(sheet, rowNum) {
+  const termName = sheet.getName();
+  const data = sheet.getRange(3, 1, Math.max(1, sheet.getLastRow() - 2), 10).getValues();
+
+  const targetRow = data[rowNum - 3];
+  if (!targetRow) return;
+
+  const section = targetRow[0];
+  const subject = targetRow[1];
+  const teacher = targetRow[2];
+  const tIn = parseTime(targetRow[8]);
+  const tOut = parseTime(targetRow[9]);
+
+  // AI Learning Module: Memorize manual overrides
+  if (section && subject && teacher) {
+    const props = PropertiesService.getDocumentProperties();
+    props.setProperty('LEARNED_' + subject + '|' + section, teacher);
+  }
+
+  if (!teacher || tIn >= tOut) {
+    sheet.getRange(rowNum, 12).setValue('');
+    return;
+  }
+
+  const activeDays = [3, 4, 5, 6, 7].filter(d => targetRow[d] === true);
+  if (activeDays.length === 0) return;
+
+  let overlaps = [];
+  let dailyHrs = {3:0, 4:0, 5:0, 6:0, 7:0};
+
+  data.forEach((r, idx) => {
+    if (idx === rowNum - 3) return; // skip self
+    const rStart = parseTime(r[8]);
+    const rEnd = parseTime(r[9]);
+    if (rStart >= rEnd) return;
+
+    // Check overlaps
+    const sameTeacher = r[2] === teacher;
+    const sameSection = r[0] === section && section !== '';
+
+    if (sameTeacher || sameSection) {
+      activeDays.forEach(d => {
+        if (r[d] === true) {
+          if (tIn < rEnd && tOut > rStart) {
+            overlaps.push(sameTeacher ? '🔴 Teacher Overlap' : '🔴 Section Overlap');
+          }
+        }
+      });
+    }
+
+    // Accumulate teacher hours
+    if (sameTeacher) {
+      activeDays.forEach(d => {
+        if (r[d] === true) dailyHrs[d] += (rEnd - rStart) / 60;
+      });
+    }
+  });
+
+  // Add current row duration to daily hrs
+  const dur = (tOut - tIn) / 60;
+  activeDays.forEach(d => dailyHrs[d] += dur);
+
+  let warnings = [];
+  if (overlaps.length > 0) warnings.push(overlaps[0]);
+
+  activeDays.forEach(d => {
+    if (dailyHrs[d] > CFG.DAILY_HARD_HOURS) warnings.push('🔴 Over 6h limit');
+    else if (dailyHrs[d] > CFG.DAILY_PREFERRED_HOURS) warnings.push('🟠 Over 5.5h limit');
+  });
+
+  const warnCell = sheet.getRange(rowNum, 12);
+  if (warnings.length > 0) {
+    warnings = [...new Set(warnings)]; // Dedup
+    const hasError = warnings.some(w => w.includes('🔴'));
+    warnCell.setValue(warnings.join(', ')).setFontColor(hasError ? C.error : C.warn).setFontStyle('normal').setFontWeight('bold');
+  } else {
+    warnCell.setValue('✅ Valid').setFontColor(C.ok).setFontStyle('italic').setFontWeight('normal');
+  }
+}
+
+
 // ══════════════════════════════════════════════════════════════
 //  SECTION 5: DASHBOARD ENGINES (Teacher & Section)
 // ══════════════════════════════════════════════════════════════
 
-function updateDashboardUI(dash, ss, pane = 1) {
-  const colOffset = pane === 1 ? 0 : 10; // Pane 1 is col 1, Pane 2 is col 11 (K)
-  const prefix = pane === 1 ? '' : '1';
-
-  const teacher = dash.getRange(2, 2 + colOffset).getValue();
-  const day     = dash.getRange(3, 2 + colOffset).getValue();
-  const term    = dash.getRange(4, 2 + colOffset).getValue();
+function updateDashboardUI(dash, ss) {
+  const teacher = dash.getRange('B2').getValue();
+  const day     = dash.getRange('B3').getValue();
+  const term    = dash.getRange('B4').getValue();
 
   const maxR = dash.getMaxRows();
-  if (maxR > 5) dash.getRange(6, 1 + colOffset, maxR - 5, 9).clearContent().clearDataValidations().clearFormat();
+  if (maxR > 5) dash.getRange(6, 1, maxR - 5, 9).clearContent().clearDataValidations().clearFormat();
   
-  dash.getRange(4, 3 + colOffset).setValue('');
-  dash.getRange(4, 5 + colOffset).setValue('Select options...').setBackground(C.tealLight).setFontColor(C.teal);
+  dash.getRange('C4').setValue('');
+  dash.getRange('E4').setValue('Select options...').setBackground(C.tealLight).setFontColor(C.teal);
 
   if (!teacher || !term) return;
 
-  const src = ss.getSheetByName(CFG.TEACHER_ASSIGN);
+  const src = ss.getSheetByName(term);
   if (!src) return;
 
-  const dayMap = { MON: 6, TUE: 7, WED: 8, THU: 9, FRI: 10 };
+  const dayMap = { MON: 3, TUE: 4, WED: 5, THU: 6, FRI: 7 };
   const lastRow = src.getLastRow();
   if (lastRow < 3) return;
-  const rows = src.getRange(3, 1, lastRow - 2, 13).getValues();
+  const rows = src.getRange(3, 1, lastRow - 2, 10).getValues();
   
   let output = [];
   let totalMins = 0;
 
   rows.forEach(row => {
-    if (row[0] !== term || row[5] !== teacher) return;
+    if (row[2] !== teacher) return;
     
-    const start = parseTime(row[11]);
-    const end   = parseTime(row[12]);
+    const start = parseTime(row[8]);
+    const end   = parseTime(row[9]);
     const dur   = calcEffectiveDuration(start, end); 
 
     if (day === 'ALL WEEK') {
       let daysOn = 0;
-      for (let d = 6; d <= 10; d++) { if (row[d] === true) daysOn++; }
+      for (let d = 3; d <= 7; d++) { if (row[d] === true) daysOn++; }
       totalMins += dur * daysOn;
-      output.push([row[2], row[1], row[11], row[12], row[6], row[7], row[8], row[9], row[10]]);
+      output.push([row[1], row[0], row[8], row[9], row[3], row[4], row[5], row[6], row[7]]);
     } else {
       if (row[dayMap[day]] !== true) return;
       totalMins += dur;
-      output.push([row[2], row[1], row[11], row[12], '', '', '', '', '']);
+      output.push([row[1], row[0], row[8], row[9], '', '', '', '', '']);
     }
   });
 
@@ -816,7 +621,7 @@ function updateDashboardUI(dash, ss, pane = 1) {
   output.sort((a, b) => parseTime(a[2]) - parseTime(b[2]));
 
   const totalHours = totalMins / 60;
-  dash.getRange(4, 3 + colOffset).setValue(totalHours);
+  dash.getRange('C4').setValue(totalHours);
 
   let statusText = '✅ Normal Load';
   let statusBg = C.okBg; let statusFg = C.ok;
@@ -833,23 +638,23 @@ function updateDashboardUI(dash, ss, pane = 1) {
     statusText = '⚪ No Load'; statusBg = C.navyLight; statusFg = C.muted;
   }
 
-  dash.getRange(4, 3 + colOffset).setBackground(statusBg).setFontColor(statusFg);
-  dash.getRange(4, 5 + colOffset).setValue(statusText).setBackground(statusBg).setFontColor(statusFg);
+  dash.getRange('C4').setBackground(statusBg).setFontColor(statusFg);
+  dash.getRange('E4').setValue(statusText).setBackground(statusBg).setFontColor(statusFg);
 
   if (!output.length) {
-    dash.getRange(6, 1 + colOffset, 1, 9).merge().setValue('No schedule found for these criteria.').setFontStyle('italic').setFontColor(C.muted).setHorizontalAlignment('center');
+    dash.getRange('A6:I6').merge().setValue('No schedule found for these criteria.').setFontStyle('italic').setFontColor(C.muted).setHorizontalAlignment('center');
     return;
   }
 
-  dash.getRange(6, 1 + colOffset, output.length, 9).setValues(output);
+  dash.getRange(6, 1, output.length, 9).setValues(output);
   for (let r = 0; r < output.length; r++) {
-    dash.getRange(6 + r, 1 + colOffset, 1, 9).setBackground(r % 2 === 0 ? C.white : C.rowAlt).setFontColor(C.body);
+    dash.getRange(6 + r, 1, 1, 9).setBackground(r % 2 === 0 ? C.white : C.rowAlt).setFontColor(C.body);
   }
-  dash.getRange(6, 2 + colOffset, output.length, 1).setHorizontalAlignment('center');
-  dash.getRange(6, 3 + colOffset, output.length, 2).setNumberFormat('h:mm AM/PM').setHorizontalAlignment('center');
+  dash.getRange(6, 2, output.length, 1).setHorizontalAlignment('center');
+  dash.getRange(6, 3, output.length, 2).setNumberFormat('h:mm AM/PM').setHorizontalAlignment('center');
   if (isWeekly) {
     const rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
-    dash.getRange(6, 5 + colOffset, output.length, 5).setDataValidation(rule).setHorizontalAlignment('center');
+    dash.getRange(6, 5, output.length, 5).setDataValidation(rule).setHorizontalAlignment('center');
   }
 }
 
@@ -866,33 +671,34 @@ function updateSectionDashboardUI(dash, ss) {
 
   if (!section || !term) return;
 
-  const src = ss.getSheetByName(CFG.TEACHER_ASSIGN);
+  const src = ss.getSheetByName(term);
   if (!src) return;
 
-  const dayMap = { MON: 6, TUE: 7, WED: 8, THU: 9, FRI: 10 };
+  const dayMap = { MON: 3, TUE: 4, WED: 5, THU: 6, FRI: 7 };
   const lastRow = src.getLastRow();
   if (lastRow < 3) return;
-  const rows = src.getRange(3, 1, lastRow - 2, 13).getValues();
+  const rows = src.getRange(3, 1, lastRow - 2, 10).getValues();
   
   let output = [];
   let totalMins = 0;
 
   rows.forEach(row => {
-    if (row[0] !== term || row[1] !== section) return;
+    if (row[0] !== section) return; // Match Grade Level/Section instead of Teacher
     
-    const start = parseTime(row[11]);
-    const end   = parseTime(row[12]);
+    const start = parseTime(row[8]);
+    const end   = parseTime(row[9]);
     const dur   = calcEffectiveDuration(start, end); 
 
     if (day === 'ALL WEEK') {
       let daysOn = 0;
-      for (let d = 6; d <= 10; d++) { if (row[d] === true) daysOn++; }
+      for (let d = 3; d <= 7; d++) { if (row[d] === true) daysOn++; }
       totalMins += dur * daysOn;
-      output.push([row[2], row[5] || 'Pending', row[11], row[12], row[6], row[7], row[8], row[9], row[10]]);
+      // Note the column swap: Subject, Teacher, TimeIn...
+      output.push([row[1], row[2], row[8], row[9], row[3], row[4], row[5], row[6], row[7]]);
     } else {
       if (row[dayMap[day]] !== true) return;
       totalMins += dur;
-      output.push([row[2], row[5] || 'Pending', row[11], row[12], '', '', '', '', '']);
+      output.push([row[1], row[2], row[8], row[9], '', '', '', '', '']);
     }
   });
 
@@ -942,61 +748,6 @@ function updateSectionDashboardUI(dash, ss) {
 //  SECTION 6: DATA SYNC (Cascading Deletes & Dropdowns)
 // ══════════════════════════════════════════════════════════════
 
-
-function syncSubjectsToAssignment() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
-  const master = ss.getSheetByName(CFG.TEACHER_ASSIGN);
-  const teachList = ss.getSheetByName(CFG.TEACHER_ENROLL);
-
-  if (!subSheet || !master || !teachList) return;
-
-  const demands = subSheet.getRange(3, 1, Math.max(1, subSheet.getLastRow() - 2), 4).getValues().filter(r => r[0] && r[1] && r[2]);
-  const existingMaster = master.getRange(3, 1, Math.max(1, master.getLastRow() - 2), 3).getValues(); // Check Term, Sec, Subj
-  const teachers = teachList.getRange(3, 1, Math.max(1, teachList.getLastRow() - 2), 3).getValues().filter(r => r[1]);
-
-  const existingSet = new Set(existingMaster.map(r => r.join('|')));
-  let toAppend = [];
-
-  demands.forEach(d => {
-    const key = d[0] + '|' + d[1] + '|' + d[2];
-    if (!existingSet.has(key)) {
-      // Need to add this
-      const subject = d[2].toString().toLowerCase();
-      let suggestions = [];
-      teachers.forEach(t => {
-        const spec = t[2].toString().toLowerCase();
-        if (spec && (subject.includes(spec) || spec.includes(subject))) {
-          suggestions.push(t[1]);
-        }
-      });
-      if (suggestions.length === 0) {
-        teachers.forEach(t => {
-          const spec = t[2].toString().toLowerCase();
-          const words = subject.split(' ').filter(w => w.length > 3);
-          if (words.some(w => spec.includes(w))) suggestions.push(t[1]);
-        });
-      }
-      const suggStr = suggestions.length > 0 ? suggestions.slice(0, 3).join(', ') : 'Any Teacher';
-
-      // 'Term', 'Section', 'Subject', 'Hrs', 'Suggested Teachers', 'Assigned Teacher', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'Time In', 'Time Out', 'Status', 'Action'
-      toAppend.push([d[0], d[1], d[2], d[3], suggStr, '', false, false, false, false, false, '', '', '⚪ Pending Assignment', '—']);
-    }
-  });
-
-  if (toAppend.length > 0) {
-    const startRow = Math.max(3, master.getLastRow() + 1);
-    master.getRange(startRow, 1, toAppend.length, 15).setValues(toAppend);
-
-    // Set teacher dropdown validation for new rows
-    const teacherNames = teachers.map(t => t[1]);
-    const teacherRule = SpreadsheetApp.newDataValidation().requireValueInList(teacherNames, true).build();
-    master.getRange(startRow, 6, toAppend.length, 1).setDataValidation(teacherRule).setBackground(C.tealLight).setFontWeight('bold');
-
-    ss.toast(`Synced ${toAppend.length} new subjects to Master Assignment.`, '🔄 Sync Complete', 3);
-  }
-}
-
 function cleanOrphanedData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const secSheet = ss.getSheetByName(CFG.SECTION_ENROLL);
@@ -1021,17 +772,14 @@ function cleanOrphanedData() {
   if (subChanged) subRange.setValues(subValues);
 
   const teachLastRow = Math.max(3, teachAssignSheet.getLastRow());
-  const teachRange = teachAssignSheet.getRange('A3:F' + teachLastRow); // Up to Col F (Assigned Teacher)
+  const teachRange = teachAssignSheet.getRange('A3:C' + teachLastRow);
   const teachValues = teachRange.getValues();
   let teachChanged = false;
 
   teachValues.forEach(row => {
-    // Col B (idx 1): Section
-    if (row[1] && !validSections.has(row[1])) { row[1] = ''; teachChanged = true; }
-    // Col C (idx 2): Subject
-    if (row[2] && !validSubjects.has(row[2])) { row[2] = ''; teachChanged = true; }
-    // Col F (idx 5): Assigned Teacher
-    if (row[5] && !validTeachers.has(row[5])) { row[5] = ''; teachChanged = true; }
+    if (row[0] && !validTeachers.has(row[0])) { row[0] = ''; teachChanged = true; }
+    if (row[1] && !validSubjects.has(row[1])) { row[1] = ''; teachChanged = true; }
+    if (row[2] && !validSections.has(row[2])) { row[2] = ''; teachChanged = true; }
   });
   
   if (teachChanged) teachRange.setValues(teachValues);
@@ -1059,15 +807,21 @@ function updateTeacherNameDropdowns() {
   if (!enrollSheet) return;
   const rule = SpreadsheetApp.newDataValidation().requireValueInRange(enrollSheet.getRange('B3:B1000'), true).build();
   
-  if (assignSheet) assignSheet.getRange('F3:F1000').setDataValidation(rule); // Col F is Assigned Teacher
-  if (dashSheet) {
-    dashSheet.getRange('B2').setDataValidation(rule);
-    dashSheet.getRange('L2').setDataValidation(rule);
-  }
+  if (assignSheet) assignSheet.getRange('A3:A1000').setDataValidation(rule);
+  if (dashSheet) dashSheet.getRange('B2').setDataValidation(rule);
 }
 
 function updateTeacherDropdownOptions() {
-  // Deprecated: Handled dynamically by syncSubjectsToAssignment
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
+  const teachSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
+  if (!subSheet || !teachSheet) return;
+
+  const subjectRule = SpreadsheetApp.newDataValidation().requireValueInRange(subSheet.getRange('C3:C1000'), true).build();
+  teachSheet.getRange('B3:B1000').setDataValidation(subjectRule);
+
+  const sectionRule = SpreadsheetApp.newDataValidation().requireValueInRange(subSheet.getRange('B3:B1000'), true).build();
+  teachSheet.getRange('C3:C1000').setDataValidation(sectionRule);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1115,90 +869,77 @@ function buildPhase2TeacherTabs() {
 
   let assignSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN) || ss.insertSheet(CFG.TEACHER_ASSIGN, 3);
   assignSheet.clear();
-  assignSheet.getRange('A1:O1').merge().setValue('👑 MASTER ASSIGNMENT & DYNAMIC SCHEDULE CANVAS').setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  assignSheet.setRowHeight(1, 40);
-
-  const headers = ['Term', 'Section', 'Subject', 'Hrs', 'Suggested Teachers', 'Assigned Teacher', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'Time In', 'Time Out', 'Status / Conflicts', 'Action'];
-  assignSheet.getRange('A2:O2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  assignSheet.setRowHeight(2, 30);
-
-  assignSheet.setColumnWidth(1, 80); assignSheet.setColumnWidth(2, 120); assignSheet.setColumnWidth(3, 180); assignSheet.setColumnWidth(4, 40);
-  assignSheet.setColumnWidth(5, 180); assignSheet.setColumnWidth(6, 200);
-  assignSheet.setColumnWidths(7, 5, 45); assignSheet.setColumnWidths(12, 2, 85);
-  assignSheet.setColumnWidth(14, 250); assignSheet.setColumnWidth(15, 100);
-
-  assignSheet.getRange('A3:O1000').setFontColor(C.body).setVerticalAlignment('middle');
-
-  const cbRule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
-  assignSheet.getRange('G3:K1000').setDataValidation(cbRule).setHorizontalAlignment('center');
-
-  assignSheet.getRange('L3:M1000').setHorizontalAlignment('center').setNumberFormat('h:mm AM/PM');
-  assignSheet.getRange('A3:A1000').setHorizontalAlignment('center');
-  assignSheet.getRange('E3:E1000').setFontColor(C.muted).setFontStyle('italic').setWrap(true);
-
-  const actionRule = SpreadsheetApp.newDataValidation().requireValueInList(['—', 'Fix Conflict'], true).build();
-  assignSheet.getRange('O3:O1000').setDataValidation(actionRule).setValue('—').setHorizontalAlignment('center');
-
+  assignSheet.getRange('A1:C1').merge().setValue('👤 FACULTY ASSIGNMENTS & PREFERENCES').setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  assignSheet.getRange('A2:C2').setValues([['Teacher Name', 'Assigned Subject', 'Assigned Section']]).setFontWeight('bold').setFontSize(10).setBackground(C.navy).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  assignSheet.setColumnWidth(1, 250); assignSheet.setColumnWidth(2, 250); assignSheet.setColumnWidth(3, 200);
+  assignSheet.getRange('A3:C1000').setFontColor(C.body).setVerticalAlignment('middle');
   assignSheet.setFrozenRows(2);
 
   updateTeacherNameDropdowns();
-  ss.toast('Teacher Enrollment & Master Canvas initialized.', '✅ Phase 2 Complete', 5);
+  updateTeacherDropdownOptions();
+  ss.toast('Teacher Enrollment and Assignment tabs initialized.', '✅ Phase 2 Complete', 5);
 }
 
+function buildPhase3TermTabs() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
 
+  CFG.TERMS.forEach((term, index) => {
+    let sheet = ss.getSheetByName(term) || ss.insertSheet(term, 4 + index);
+    sheet.clear();
+    sheet.getRange('A1:J1').merge().setValue(`📅 ${term.toUpperCase()} MASTER SCHEDULE`).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+    sheet.setRowHeight(1, 40);
+
+    const headers = ['GRADE Level', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out', 'Action', 'Warnings', 'Suggested Teachers'];
+    sheet.getRange('A2:M2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+    sheet.setRowHeight(2, 30);
+
+    sheet.setColumnWidth(1, 150); sheet.setColumnWidth(2, 250); sheet.setColumnWidth(3, 200);
+    sheet.setColumnWidths(4, 5, 80); sheet.setColumnWidths(9, 2, 110);
+
+    sheet.getRange('A3:J1000').setFontColor(C.body).setVerticalAlignment('middle');
+
+    const cbRule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+    sheet.getRange('D3:H1000').setDataValidation(cbRule).setHorizontalAlignment('center');
+
+    sheet.getRange('I3:J1000').setHorizontalAlignment('center').setNumberFormat('h:mm AM/PM');
+    sheet.getRange('A3:A1000').setHorizontalAlignment('center');
+    sheet.getRange('B3:C1000').setHorizontalAlignment('left');
+    sheet.setFrozenRows(2);
+  });
+
+  ss.toast('Term schedules successfully built.', '✅ Phase 3 Complete', 5);
+}
 
 function buildPhase4Dashboard() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let dash = ss.getSheetByName(CFG.DASHBOARD) || ss.insertSheet(CFG.DASHBOARD, 1); 
   dash.clear();
 
-  dash.getRange('A1:S1').merge().setValue('🏫 FACULTY LOADING — DUAL TEACHER COMPARISON VIEWER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  dash.getRange('A1:I1').merge().setValue('🏫 FACULTY LOADING — TEACHER SCHEDULE VIEWER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
   dash.setRowHeight(1, 46);
 
   const lbl = (cell, text) => dash.getRange(cell).setValue(text).setFontWeight('bold').setHorizontalAlignment('right').setFontColor(C.navy);
-  const inputBox = (a1, bg) => dash.getRange(a1).setBackground(bg).setBorder(true,true,true,true,null,null,C.border,SpreadsheetApp.BorderStyle.SOLID).setFontColor(C.navy);
-
-  // Pane 1 (Left)
-  lbl('A2', '👤 Teacher 1'); lbl('A3', '📅 Day Filter'); lbl('A4', '📑 Term');
+  lbl('A2', '👤 Teacher'); lbl('A3', '📅 Day Filter'); lbl('A4', '📑 Term');
   dash.getRange('D4').setValue('Status').setFontColor(C.muted).setFontSize(10).setHorizontalAlignment('right');
+
+  const inputBox = (a1, bg) => dash.getRange(a1).setBackground(bg).setBorder(true,true,true,true,null,null,C.border,SpreadsheetApp.BorderStyle.SOLID).setFontColor(C.navy);
   inputBox('B2', C.navyLight); inputBox('B3', C.navyLight); inputBox('B4', C.navyLight);
   inputBox('C4', C.tealLight).setNumberFormat('0.0 "hrs"').setFontWeight('bold'); 
   inputBox('E4', C.tealLight).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center'); 
+  dash.setRowHeights(2, 3, 28);
 
   dash.getRange('B3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).build()).setValue('ALL WEEK');
   dash.getRange('B4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setValue(CFG.TERMS[0]);
 
   dash.getRange('A5:I5').setValues([['Subject','Grade Level','Time In','Time Out','MON','TUE','WED','THU','FRI']]).setFontWeight('bold').setFontSize(10).setBackground(C.navy).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-
-  // Spacer
-  dash.setColumnWidth(10, 20);
-  dash.getRange('J2:J1000').setBackground(C.navyLight);
-
-  // Pane 2 (Right)
-  lbl('K2', '👤 Teacher 2'); lbl('K3', '📅 Day Filter'); lbl('K4', '📑 Term');
-  dash.getRange('N4').setValue('Status').setFontColor(C.muted).setFontSize(10).setHorizontalAlignment('right');
-  inputBox('L2', C.navyLight); inputBox('L3', C.navyLight); inputBox('L4', C.navyLight);
-  inputBox('M4', C.tealLight).setNumberFormat('0.0 "hrs"').setFontWeight('bold');
-  inputBox('O4', C.tealLight).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center');
-
-  dash.getRange('L3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).build()).setValue('ALL WEEK');
-  dash.getRange('L4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setValue(CFG.TERMS[0]);
-
-  dash.getRange('K5:S5').setValues([['Subject','Grade Level','Time In','Time Out','MON','TUE','WED','THU','FRI']]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-
-  dash.setRowHeights(2, 3, 28);
   dash.setRowHeight(5, 30);
   
   dash.setColumnWidth(1, 260); dash.setColumnWidth(2, 130); dash.setColumnWidths(3, 2, 110); dash.setColumnWidths(5, 5, 52);
-  dash.setColumnWidth(11, 260); dash.setColumnWidth(12, 130); dash.setColumnWidths(13, 2, 110); dash.setColumnWidths(15, 5, 52);
-
   dash.getRange('C6:D').setNumberFormat('h:mm AM/PM');
-  dash.getRange('M6:N').setNumberFormat('h:mm AM/PM');
-
-  dash.setFrozenRows(5); dash.showColumns(5, 5); dash.showColumns(15, 5);
+  dash.setFrozenRows(5); dash.showColumns(5, 5);
   updateTeacherNameDropdowns();
 
-  ss.toast('Dual Teacher Dashboard fully constructed.', '✅ Phase 4 Complete', 5);
+  ss.toast('Teacher Dashboard fully constructed.', '✅ Phase 4 Complete', 5);
 }
 
 function buildPhase5ConflictReport() {
@@ -1292,214 +1033,110 @@ function formatMinsToTime(mins) {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 
+
 // ══════════════════════════════════════════════════════════════
-//  SECTION 9: PDF GENERATION (Class Programs)
+//  SECTION 10: MASTER SECTION VISUALIZER
 // ══════════════════════════════════════════════════════════════
 
-function generateScheduleUI() {
-  const htmlOutput = HtmlService.createHtmlOutput(`
-    <div style="font-family: Arial, sans-serif; padding: 10px;">
-      <h4>Generate Schedule PDF</h4>
-      <label><b>Mode:</b></label><br>
-      <select id="mode" style="width: 100%; padding: 5px; margin-bottom: 10px;">
-        <option value="Teacher">Per Teacher</option>
-        <option value="Section">Per Section</option>
-      </select>
-
-      <label><b>Term:</b></label><br>
-      <select id="term" style="width: 100%; padding: 5px; margin-bottom: 10px;">
-        ${CFG.TERMS.map(t => `<option value="${t}">${t}</option>`).join('')}
-      </select>
-
-      <label><b>Name (Exact text):</b></label><br>
-      <input type="text" id="targetName" placeholder="e.g. MICHELLE JANE GACUSAN or 11-Lone" style="width: 100%; padding: 5px; margin-bottom: 15px;">
-
-      <button onclick="generate()" style="background-color: #1a3a6e; color: white; border: none; padding: 8px 16px; cursor: pointer; width: 100%;">Generate PDF</button>
-
-      <p id="status" style="margin-top: 15px; font-size: 12px; color: #b71c1c;"></p>
-
-      <script>
-        function generate() {
-          const mode = document.getElementById('mode').value;
-          const term = document.getElementById('term').value;
-          const targetName = document.getElementById('targetName').value;
-
-          if (!targetName) {
-            document.getElementById('status').innerText = 'Please enter a name or section.';
-            return;
-          }
-
-          document.getElementById('status').innerText = 'Generating PDF... please wait. This may take up to 30 seconds.';
-          document.getElementById('status').style.color = '#00796b';
-
-          google.script.run.withSuccessHandler(url => {
-            if (url.startsWith('Error:')) {
-               document.getElementById('status').innerText = url;
-               document.getElementById('status').style.color = '#b71c1c';
-            } else {
-               document.getElementById('status').innerHTML = '<a href="' + url + '" target="_blank" style="color: #1a3a6e; font-weight: bold;">Click here to download/view your PDF</a>';
-            }
-          }).processPDFGeneration(mode, term, targetName);
-        }
-      </script>
-    </div>
-  `).setWidth(300).setHeight(320);
-
-  SpreadsheetApp.getUi().showModalDialog(htmlOutput, '🖨️ PDF Exporter');
-}
-
-function processPDFGeneration(mode, termName, targetName) {
-  try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const masterSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
-    if (!masterSheet) return 'Error: Master sheet not found.';
-
-    const data = masterSheet.getRange(3, 1, Math.max(1, masterSheet.getLastRow() - 2), 13).getValues().filter(r => r[0] === termName);
-
-    // Filter matching rows
-    let rows = [];
-    if (mode === 'Teacher') {
-      rows = data.filter(r => r[5] && r[5].toString().toLowerCase() === targetName.toLowerCase()); // Assigned Teacher is col 5
-    } else {
-      rows = data.filter(r => r[1] && r[1].toString().toLowerCase() === targetName.toLowerCase()); // Section is col 1
-    }
-
-    if (!rows.length) return 'Error: No schedule found for ' + targetName;
-
-    return buildPDFTemplateSheetAndExport(mode, targetName, rows);
-  } catch (err) {
-    return 'Error: ' + err.toString();
-  }
-}
-
-function buildPDFTemplateSheetAndExport(mode, targetName, rows) {
+function buildAllSectionsVisualizer() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const visName = '📚 All Sections Schedule';
+  let vis = ss.getSheetByName(visName) || ss.insertSheet(visName, 5);
+  vis.clear();
 
-  // Create a temporary sheet
-  const tempName = 'TEMP_PDF_' + new Date().getTime();
-  const ts = ss.insertSheet(tempName);
+  vis.getRange('A1:G1').merge().setValue('📚 MASTER SECTIONS TIMETABLE VISUALIZER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  vis.setRowHeight(1, 46);
+  vis.setColumnWidth(1, 100); vis.setColumnWidth(2, 90); vis.setColumnWidths(3, 5, 140);
 
-  try {
-    // 1. Setup Headers
-    if (mode === 'Teacher') {
-      ts.getRange('A1:G1').merge().setValue('Name of Teacher: ' + targetName.toUpperCase()).setFontWeight('bold').setFontSize(14);
-      // Try to find specialization from Phase 2
-      const teachList = ss.getSheetByName(CFG.TEACHER_ENROLL);
-      let spec = 'UNKNOWN';
-      if (teachList) {
-         const tData = teachList.getRange(3,2,teachList.getLastRow(), 2).getValues();
-         const match = tData.find(r => r[0].toString().toLowerCase() === targetName.toLowerCase());
-         if (match) spec = match[1];
-      }
-      ts.getRange('A2:G2').merge().setValue('Specialization: ' + spec).setFontWeight('bold').setFontSize(14);
-    } else {
-      ts.getRange('A1:G1').merge().setValue('Grade Level: ' + targetName).setFontWeight('bold').setFontSize(14);
-      ts.getRange('A2:G2').merge().setValue('Name of Adviser: ').setFontWeight('bold').setFontSize(14);
-    }
+  let allRows = [];
+  CFG.TERMS.forEach(term => {
+     const ts = ss.getSheetByName(term);
+     if (!ts) return;
+     const lr = ts.getLastRow();
+     if (lr >= 3) {
+        const rows = ts.getRange(3, 1, lr - 2, 11).getValues();
+        allRows = allRows.concat(rows);
+     }
+  });
 
-    // 2. Setup Table Headers
-    const headers = ['TIME', 'NO. OF MINUTES', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY'];
-    ts.getRange('A4:G4').setValues([headers]).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setBorder(true,true,true,true,true,true);
-    ts.setColumnWidth(1, 100); ts.setColumnWidth(2, 90); ts.setColumnWidths(3, 5, 130);
-
-    // 3. Define Standard Timetable grid based on screenshots
-    const grid = [
-      { t: '7:00-7:30', m: 30, mon: 'Flag Raising\nCeremony', tue: 'GROUND PREPARATION/DAILY MORNING ROUTINE', wed: '', thu: '', fri: '', mergeSubj: true },
-      { t: '7:30-8:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-      { t: '8:30-9:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-      { t: '9:30-9:45', m: 15, mon: 'RECESS/GROUP HANDWASHING/TOOTH BRUSHING', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
-      { t: '9:45-10:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-      { t: '10:45-11:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-      { t: '11:45-1:00', m: 75, mon: 'LUNCH BREAK', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
-      { t: '1:00-2:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-      { t: '1:00-2:30', m: 90, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
-      { t: '2:00-3:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-      { t: '2:30-3:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
-      { t: '3:00-4:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-      { t: '3:30-4:00', m: 30, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
-    ];
-
-    // Determine if it's SHS or Standard grid based on row data
-    const isSHS = rows.some(r => {
-       const grMatch = r[0].toString().match(/\b(11|12)\b/);
-       return grMatch != null;
-    });
-
-    const activeGrid = grid.filter(g => {
-       if (isSHS) {
-         return !['1:00-2:00', '2:00-3:00', '3:00-4:00'].includes(g.t);
-       } else {
-         return !g.shs;
-       }
-    });
-
-    // 4. Map the data into the grid
-    let outputGrid = [];
-    const days = ['MON', 'TUE', 'WED', 'THU', 'FRI'];
-    const dIdx = { 'MON': 0, 'TUE': 1, 'WED': 2, 'THU': 3, 'FRI': 4 };
-
-    // Function to find matching schedule for a given time slot and day
-    const getSchedule = (timeStr, dayIndex) => {
-       const [inStr, outStr] = timeStr.split('-');
-       const sStart = parseTime(inStr.includes('AM') || inStr.includes('PM') ? inStr : inStr + (parseInt(inStr.split(':')[0]) < 7 || parseInt(inStr.split(':')[0]) === 12 ? ' PM' : ' AM'));
-
-       const matched = rows.find(r => {
-          if (r[6 + dayIndex] !== true) return false; // Days start at col 6
-          const rStart = parseTime(r[11]); // TimeIn is col 11
-          return Math.abs(rStart - sStart) < 15; // Match starts within 15 mins
-       });
-
-       if (!matched) return '';
-
-       if (mode === 'Teacher') {
-         return matched[2] + '\n' + matched[1]; // Subject + Section
-       } else {
-         return matched[2] + '\n(' + (matched[5] || 'Pending') + ')'; // Subject + Assigned Teacher
-       }
-    };
-
-    activeGrid.forEach(g => {
-       let m = g.mon, t = g.tue, w = g.wed, th = g.thu, f = g.fri;
-
-       if (!g.mergeSubj) {
-          m = getSchedule(g.t, 0) || m;
-          t = getSchedule(g.t, 1) || t;
-          w = getSchedule(g.t, 2) || w;
-          th = getSchedule(g.t, 3) || th;
-          f = getSchedule(g.t, 4) || f;
-       }
-
-       outputGrid.push([g.t, g.m, m, t, w, th, f]);
-    });
-
-    ts.getRange(5, 1, outputGrid.length, 7).setValues(outputGrid).setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setBorder(true,true,true,true,true,true);
-
-    // Apply Merges for specific rows
-    for (let i = 0; i < activeGrid.length; i++) {
-       const r = 5 + i;
-       if (activeGrid[i].t === '7:00-7:30') { ts.getRange(r, 4, 1, 4).merge().setBackground('#d9d9d9'); ts.getRange(r, 3).setBackground('#d9d9d9'); }
-       if (activeGrid[i].t === '9:30-9:45') { ts.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
-       if (activeGrid[i].t === '11:45-1:00') { ts.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
-    }
-
-    // 5. Build PDF URL
-    SpreadsheetApp.flush();
-    const url = ss.getUrl().replace(/edit$/, '') + 'export?exportFormat=pdf&format=pdf' +
-      '&size=A4&portrait=false&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false' +
-      '&gridlines=false&fzr=false&gid=' + ts.getSheetId();
-
-    const token = ScriptApp.getOAuthToken();
-    const response = UrlFetchApp.fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
-
-    const blob = response.getBlob().setName(targetName + '_Schedule.pdf');
-    const file = DriveApp.createFile(blob);
-
-    // Clean up
-    ss.deleteSheet(ts);
-
-    return file.getUrl();
-  } catch (err) {
-    if (ts) ss.deleteSheet(ts);
-    return 'Error creating PDF: ' + err.toString();
+  if (allRows.length === 0) {
+     return ss.toast('No schedules found in Term tabs to visualize.', '⚠️ Empty', 4);
   }
+
+  const sections = [...new Set(allRows.map(r => r[0] ? r[0].toString().trim() : '').filter(String))];
+
+  sections.sort((a, b) => {
+     const matchA = a.match(/\d+/); const matchB = b.match(/\d+/);
+     const numA = matchA ? parseInt(matchA[0], 10) : 0;
+     const numB = matchB ? parseInt(matchB[0], 10) : 0;
+     if (numA !== numB) return numA - numB;
+     return a.localeCompare(b);
+  });
+
+  let currentRow = 3;
+
+  sections.forEach(section => {
+      const secRows = allRows.filter(r => r[0] && r[0].toString().trim() === section);
+      if (secRows.length === 0) return;
+
+      const isSHS = section.match(/\b(11|12)\b/) != null;
+
+      vis.getRange(currentRow, 1, 1, 7).merge().setValue('Cohort / Section: ' + section).setFontWeight('bold').setFontSize(12).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('left').setVerticalAlignment('middle');
+      currentRow++;
+
+      const headers = ['TIME', 'MINS', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY'];
+      vis.getRange(currentRow, 1, 1, 7).setValues([headers]).setFontWeight('bold').setBackground(C.navyLight).setHorizontalAlignment('center').setVerticalAlignment('middle').setBorder(true,true,true,true,true,true);
+      currentRow++;
+
+      const grid = [
+        { t: '7:00-7:30', m: 30, mon: 'Flag Raising\nCeremony', tue: 'GROUND PREPARATION/DAILY MORNING ROUTINE', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '7:30-8:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '8:30-9:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '9:30-9:45', m: 15, mon: 'RECESS/GROUP HANDWASHING', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '9:45-10:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '10:45-11:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '11:45-1:00', m: 75, mon: 'LUNCH BREAK', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '1:00-2:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '1:00-2:30', m: 90, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+        { t: '2:00-3:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '2:30-3:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+        { t: '3:00-4:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '3:30-4:00', m: 30, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+      ];
+
+      const activeGrid = grid.filter(g => isSHS ? !['1:00-2:00', '2:00-3:00', '3:00-4:00'].includes(g.t) : !g.shs);
+      let outputGrid = [];
+
+      const getSchedule = (timeStr, dayIndex) => {
+         const [inStr, outStr] = timeStr.split('-');
+         const sStart = parseTime(inStr.includes('AM') || inStr.includes('PM') ? inStr : inStr + (parseInt(inStr.split(':')[0]) < 7 || parseInt(inStr.split(':')[0]) === 12 ? ' PM' : ' AM'));
+         const matched = secRows.find(r => r[3 + dayIndex] === true && Math.abs(parseTime(r[8]) - sStart) < 15);
+         return matched ? matched[1] + '\n(' + matched[2] + ')' : '';
+      };
+
+      activeGrid.forEach(g => {
+         let m = g.mon, t = g.tue, w = g.wed, th = g.thu, f = g.fri;
+         if (!g.mergeSubj) {
+            m = getSchedule(g.t, 0) || m;
+            t = getSchedule(g.t, 1) || t;
+            w = getSchedule(g.t, 2) || w;
+            th = getSchedule(g.t, 3) || th;
+            f = getSchedule(g.t, 4) || f;
+         }
+         outputGrid.push([g.t, g.m, m, t, w, th, f]);
+      });
+
+      vis.getRange(currentRow, 1, outputGrid.length, 7).setValues(outputGrid).setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setBorder(true,true,true,true,true,true);
+
+      for (let i = 0; i < activeGrid.length; i++) {
+         const r = currentRow + i;
+         if (activeGrid[i].t === '7:00-7:30') { vis.getRange(r, 4, 1, 4).merge().setBackground('#d9d9d9'); vis.getRange(r, 3).setBackground('#d9d9d9'); }
+         if (activeGrid[i].t === '9:30-9:45') { vis.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+         if (activeGrid[i].t === '11:45-1:00') { vis.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+      }
+
+      currentRow += outputGrid.length + 2;
+  });
+
+  ss.toast('Visualizer generated successfully!', '✅ Done', 4);
 }
