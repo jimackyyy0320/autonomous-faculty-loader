@@ -181,7 +181,7 @@ function runAutoScheduler() {
     termDemands.forEach(d => {
       const section = d[1].toString().trim();
       const subject = d[2].toString().trim();
-      let hoursLeft = Math.round(parseFloat(d[3]) || 0);
+      let hoursLeft = parseFloat(d[3]) || 0;
       const originalHours = hoursLeft;
       
       const teacher = assignMap[`${subject}|${section}`] || '⚠️ Unassigned';
@@ -199,8 +199,35 @@ function runAutoScheduler() {
 
       let candidateSlots = grade >= 11 ? SHS_SLOTS : STANDARD_SLOTS;
 
-      // Shuffle candidateSlots slightly to allow for regeneration randomness
-      candidateSlots = [...candidateSlots].sort(() => Math.random() - 0.5);
+      const isPhilGov = subject.toLowerCase().includes('phil gov') || subject.toLowerCase().includes('philippine politics');
+      if (isPhilGov) {
+        // Force strict 90-minute (1.5h) blocks for Phil Gov
+        candidateSlots = [
+          { in: '7:30 AM',  out: '9:00 AM',  s: 450, e: 540 },
+          { in: '9:00 AM',  out: '10:30 AM', s: 540, e: 630 },
+          { in: '10:45 AM', out: '12:15 PM', s: 645, e: 735 }, // Crosses lunch slightly if lunch starts at 11:45, wait lunch is 11:45-1:00.
+          // Let's adjust to be safe around lunch (11:45-1:00)
+          // 7:30 to 9:00
+          // 9:00 to 10:30
+          // 10:30 to 11:45 is only 1.25 hours (75 mins), so can't fit a 90 min block before lunch.
+          // After lunch: 1:00 to 2:30 PM, 2:30 to 4:00 PM
+          { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
+          { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
+        ];
+        // Ensure that these slots are only up to 10:30 AM to respect the 11:45 lunch, so we drop the 10:45 slot
+        // since 10:45 to 12:15 overlaps with lunch.
+        candidateSlots = [
+          { in: '7:30 AM',  out: '9:00 AM',  s: 450, e: 540 },
+          { in: '9:00 AM',  out: '10:30 AM', s: 540, e: 630 },
+          { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
+          { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
+        ];
+      }
+
+      // Keep candidateSlots sequential to ensure students' classes are full from 7:30 AM onwards, avoiding gaps in their schedule.
+      // We only randomize days to distribute load, but times should be filled sequentially.
+      // Note: We don't shuffle candidateSlots here anymore except for Phil Gov specific slots which will be handled.
+      // candidateSlots = [...candidateSlots].sort(() => Math.random() - 0.5);
 
       let prefDays = [1,2,3,4,5].sort(() => Math.random() - 0.5);
       const isHomeroom = subject.toLowerCase().includes('homeroom');
@@ -219,20 +246,38 @@ function runAutoScheduler() {
           candidateSlots = [ { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 } ];
         }
       } else {
-        if (hoursLeft === 4) prefDays = [1,2,4,5];
-        if (hoursLeft === 3) prefDays = [1,3,5];
-        if (hoursLeft === 2) prefDays = [2,4];
-        if (hoursLeft === 1) prefDays = [3]; 
+        if (isPhilGov && hoursLeft === 3) {
+          prefDays = [2, 4]; // 2 days x 1.5 hours = 3 hours
+        } else {
+          if (hoursLeft === 4) prefDays = [1,2,4,5];
+          if (hoursLeft === 3) prefDays = [1,3,5];
+          if (hoursLeft === 2) prefDays = [2,4];
+          if (hoursLeft === 1) prefDays = [3];
+        }
         prefDays = prefDays.sort(() => Math.random() - 0.5);
       }
 
       let slotsAcquired = [];
       let rowWarnings = [];
+      let daysUsedForSubject = new Set();
 
       const isFree = (day, slot, checkPreferred = true) => {
         const tConflict = tBooked[teacher][day].some(b => slot.s < b.e && slot.e > b.s);
         const cConflict = cBooked[section][day].some(b => slot.s < b.e && slot.e > b.s);
         if (tConflict || cConflict) return false;
+
+        // Anti-Congestion: prevent straight mornings or afternoons without a break
+        // Check how many hours this teacher already has in the morning (before 12:00 PM/720 mins)
+        // or afternoon (after 12:00 PM). Soft limit to 3.5 hours straight per half-day.
+        if (checkPreferred && !isHomeroom) {
+            const isMorning = slot.s < 720;
+            let halfDayMins = 0;
+            tBooked[teacher][day].forEach(b => {
+                if (isMorning && b.s < 720) halfDayMins += (b.e - b.s);
+                else if (!isMorning && b.s >= 720) halfDayMins += (b.e - b.s);
+            });
+            if (halfDayMins + (slot.e - slot.s) > 3 * 60) return false;
+        }
 
         const duration = slot.e - slot.s;
         if (!isHomeroom) {
@@ -247,16 +292,28 @@ function runAutoScheduler() {
       };
 
       const bookSlot = (day, slot) => {
-        tBooked[teacher][day].push({s: slot.s, e: slot.e});
-        tBookedMins[teacher][day] += (slot.e - slot.s);
-        cBooked[section][day].push({s: slot.s, e: slot.e});
-        slotsAcquired.push({ day, in: slot.in, out: slot.out, s: slot.s });
-        hoursLeft -= ((slot.e - slot.s) / 60);
+        let dur = (slot.e - slot.s) / 60;
+        let actualE = slot.e;
+        let actualOut = slot.out;
+        if (hoursLeft < dur) {
+            // Truncate the slot
+            actualE = slot.s + Math.round(hoursLeft * 60);
+            actualOut = formatMinsToTime(actualE);
+            dur = hoursLeft;
+        }
+
+        tBooked[teacher][day].push({s: slot.s, e: actualE});
+        tBookedMins[teacher][day] += (actualE - slot.s);
+        cBooked[section][day].push({s: slot.s, e: actualE});
+        slotsAcquired.push({ day, in: slot.in, out: actualOut, s: slot.s, e: actualE });
+        hoursLeft -= dur;
+        daysUsedForSubject.add(day);
       };
 
       for (let day of prefDays) {
         if (hoursLeft <= 0) break;
         for (let slot of candidateSlots) {
+          if (daysUsedForSubject.has(day) && !isHomeroom) continue;
           if (isFree(day, slot, true)) { bookSlot(day, slot); break; }
         }
       }
@@ -266,6 +323,7 @@ function runAutoScheduler() {
           if (hoursLeft <= 0) break;
           if (slotsAcquired.some(s => s.day === day)) continue; 
           for (let slot of candidateSlots) {
+            if (daysUsedForSubject.has(day)) continue;
             if (isFree(day, slot, true)) { bookSlot(day, slot); break; }
           }
         }
@@ -276,6 +334,7 @@ function runAutoScheduler() {
         for (let day of prefDays) {
           if (hoursLeft <= 0) break;
           for (let slot of candidateSlots) {
+            if (daysUsedForSubject.has(day)) continue;
             if (isFree(day, slot, false)) {
               bookSlot(day, slot);
               const warnStr = `⚠️ Exceeds ${CFG.DAILY_PREFERRED_HOURS}h limit`;
@@ -292,6 +351,7 @@ function runAutoScheduler() {
           if (hoursLeft <= 0) break;
           for (let slot of candidateSlots) {
             if (hoursLeft <= 0) break;
+            if (daysUsedForSubject.has(day)) continue;
             if (isFree(day, slot, false)) {
               bookSlot(day, slot);
               const warnStr = `⚠️ Exceeds ${CFG.DAILY_PREFERRED_HOURS}h limit`;
