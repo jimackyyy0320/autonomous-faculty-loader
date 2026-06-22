@@ -170,11 +170,16 @@ function runAutoScheduler() {
     const cBooked = {}; 
     const outputRows = [];
 
-    // Prioritize Homerooms, then heaviest hours
+    // Prioritize Homerooms, then group by Section, then by heaviest hours to pack student schedules continuously
     termDemands.sort((a, b) => {
       const isAHomeroom = a[2].toString().toLowerCase().includes('homeroom') ? 1 : 0;
       const isBHomeroom = b[2].toString().toLowerCase().includes('homeroom') ? 1 : 0;
       if (isAHomeroom !== isBHomeroom) return isBHomeroom - isAHomeroom;
+
+      const sectionA = a[1].toString().trim();
+      const sectionB = b[1].toString().trim();
+      if (sectionA !== sectionB) return sectionA.localeCompare(sectionB);
+
       return (parseFloat(b[3]) || 0) - (parseFloat(a[3]) || 0);
     });
 
@@ -231,6 +236,15 @@ function runAutoScheduler() {
 
       let prefDays = [1,2,3,4,5].sort(() => Math.random() - 0.5);
       const isHomeroom = subject.toLowerCase().includes('homeroom');
+
+      const isAralEnd = subject.match(/\bARAL\b/i) && !subject.toLowerCase().includes('panlipunan');
+
+      if (isAralEnd) {
+        // ARAL is strictly for 3-4 PM only
+        candidateSlots = [
+          { in: '3:00 PM',  out: '4:00 PM',  s: 900, e: 960 }
+        ];
+      }
 
       if (isHomeroom) {
         prefDays = [1]; 
