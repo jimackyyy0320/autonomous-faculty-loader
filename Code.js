@@ -21,16 +21,16 @@ const CFG = {
   SECTION_DASH:   'Section Dashboard', // NEW
   REPORT:         'Schedule Alignment',
   
-  LUNCH_START:       720,  // 12:00 PM (mins since midnight)
+  LUNCH_START:       705,  // 11:45 AM (mins since midnight)
   LUNCH_END:         780,  // 1:00 PM
   WEEKLY_WARN_HOURS: 28,   
   WEEKLY_HARD_HOURS: 30,   
-  DAILY_PREFERRED_HOURS: 4.5,
+  DAILY_PREFERRED_HOURS: 5.5,
   DAILY_WARN_HOURS:  5.5, 
   DAILY_HARD_HOURS:  6,   
   SLOT_STEP:         30,   
-  SCHOOL_START:      450,  // 7:30 AM 
-  SCHOOL_END:        960,  // 4:00 PM
+  SCHOOL_START:      420,  // 7:00 AM
+  SCHOOL_END:        990,  // 4:30 PM
 };
 
 const C = {
@@ -59,7 +59,10 @@ function onOpen() {
     .addItem('6️⃣ Build: Phase 6 Section Dash', 'buildPhase6SectionDashboard') // NEW
     .addSeparator()
     .addItem('🚀 RUN AUTO-SCHEDULER', 'runAutoScheduler')
+    .addItem('🔄 RECALCULATE SCHEDULE', 'runAutoScheduler')
     .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
+    .addSeparator()
+    .addItem('🖨️ Generate Schedule PDF', 'generateScheduleUI')
     .addToUi();
 }
 
@@ -147,6 +150,15 @@ function runAutoScheduler() {
     { in: '3:00 PM',  out: '4:00 PM',  s: 900, e: 960 }
   ];
 
+  const SHS_SLOTS = [
+    { in: '7:30 AM',  out: '8:30 AM',  s: 450, e: 510 },
+    { in: '8:30 AM',  out: '9:30 AM',  s: 510, e: 570 },
+    { in: '9:45 AM',  out: '10:45 AM', s: 585, e: 645 },
+    { in: '10:45 AM', out: '11:45 AM', s: 645, e: 705 },
+    { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
+    { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
+  ];
+
   let unmappedLog = [];
 
   CFG.TERMS.forEach(term => {
@@ -182,20 +194,27 @@ function runAutoScheduler() {
       if (!tBookedMins[teacher]) tBookedMins[teacher] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
       if (!cBooked[section]) cBooked[section] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
 
-      let candidateSlots = STANDARD_SLOTS;
-      let prefDays = [1,2,3,4,5];
+      const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
+      const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
+
+      let candidateSlots = grade >= 11 ? SHS_SLOTS : STANDARD_SLOTS;
+
+      // Shuffle candidateSlots slightly to allow for regeneration randomness
+      candidateSlots = [...candidateSlots].sort(() => Math.random() - 0.5);
+
+      let prefDays = [1,2,3,4,5].sort(() => Math.random() - 0.5);
       const isHomeroom = subject.toLowerCase().includes('homeroom');
 
       if (isHomeroom) {
         prefDays = [1]; 
-        const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
-        const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7; 
         
         if (grade >= 11) {
+          // If homeroom is 1 hour, it will book both if needed, or if it needs a 1 hr block directly:
+          // The prompt says "3:30pm or 4pm". Let's provide 1 hour blocks to be safe.
           candidateSlots = [
-            { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 },
-            { in: '3:00 PM', out: '4:00 PM', s: 900, e: 960 } 
-          ];
+            { in: '3:30 PM', out: '4:30 PM', s: 930, e: 990 },
+            { in: '3:00 PM', out: '4:00 PM', s: 900, e: 960 }
+          ].sort(() => Math.random() - 0.5);
         } else {
           candidateSlots = [ { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 } ];
         }
@@ -204,6 +223,7 @@ function runAutoScheduler() {
         if (hoursLeft === 3) prefDays = [1,3,5];
         if (hoursLeft === 2) prefDays = [2,4];
         if (hoursLeft === 1) prefDays = [3]; 
+        prefDays = prefDays.sort(() => Math.random() - 0.5);
       }
 
       let slotsAcquired = [];
@@ -214,9 +234,14 @@ function runAutoScheduler() {
         const cConflict = cBooked[section][day].some(b => slot.s < b.e && slot.e > b.s);
         if (tConflict || cConflict) return false;
 
-        if (checkPreferred && !isHomeroom) {
-          const duration = slot.e - slot.s;
-          if (tBookedMins[teacher][day] + duration > CFG.DAILY_PREFERRED_HOURS * 60) return false;
+        const duration = slot.e - slot.s;
+        if (!isHomeroom) {
+          if (checkPreferred) {
+            if (tBookedMins[teacher][day] + duration > CFG.DAILY_PREFERRED_HOURS * 60) return false;
+          } else {
+            // Hard limit, DepEd rule: no more than 6 hrs per day ever.
+            if (tBookedMins[teacher][day] + duration > CFG.DAILY_HARD_HOURS * 60) return false;
+          }
         }
         return true;
       };
@@ -226,7 +251,7 @@ function runAutoScheduler() {
         tBookedMins[teacher][day] += (slot.e - slot.s);
         cBooked[section][day].push({s: slot.s, e: slot.e});
         slotsAcquired.push({ day, in: slot.in, out: slot.out, s: slot.s });
-        hoursLeft--;
+        hoursLeft -= ((slot.e - slot.s) / 60);
       };
 
       for (let day of prefDays) {
@@ -1057,4 +1082,216 @@ function formatMinsToTime(mins) {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  SECTION 9: PDF GENERATION (Class Programs)
+// ══════════════════════════════════════════════════════════════
+
+function generateScheduleUI() {
+  const htmlOutput = HtmlService.createHtmlOutput(`
+    <div style="font-family: Arial, sans-serif; padding: 10px;">
+      <h4>Generate Schedule PDF</h4>
+      <label><b>Mode:</b></label><br>
+      <select id="mode" style="width: 100%; padding: 5px; margin-bottom: 10px;">
+        <option value="Teacher">Per Teacher</option>
+        <option value="Section">Per Section</option>
+      </select>
+
+      <label><b>Term:</b></label><br>
+      <select id="term" style="width: 100%; padding: 5px; margin-bottom: 10px;">
+        ${CFG.TERMS.map(t => `<option value="${t}">${t}</option>`).join('')}
+      </select>
+
+      <label><b>Name (Exact text):</b></label><br>
+      <input type="text" id="targetName" placeholder="e.g. MICHELLE JANE GACUSAN or 11-Lone" style="width: 100%; padding: 5px; margin-bottom: 15px;">
+
+      <button onclick="generate()" style="background-color: #1a3a6e; color: white; border: none; padding: 8px 16px; cursor: pointer; width: 100%;">Generate PDF</button>
+
+      <p id="status" style="margin-top: 15px; font-size: 12px; color: #b71c1c;"></p>
+
+      <script>
+        function generate() {
+          const mode = document.getElementById('mode').value;
+          const term = document.getElementById('term').value;
+          const targetName = document.getElementById('targetName').value;
+
+          if (!targetName) {
+            document.getElementById('status').innerText = 'Please enter a name or section.';
+            return;
+          }
+
+          document.getElementById('status').innerText = 'Generating PDF... please wait. This may take up to 30 seconds.';
+          document.getElementById('status').style.color = '#00796b';
+
+          google.script.run.withSuccessHandler(url => {
+            if (url.startsWith('Error:')) {
+               document.getElementById('status').innerText = url;
+               document.getElementById('status').style.color = '#b71c1c';
+            } else {
+               document.getElementById('status').innerHTML = '<a href="' + url + '" target="_blank" style="color: #1a3a6e; font-weight: bold;">Click here to download/view your PDF</a>';
+            }
+          }).processPDFGeneration(mode, term, targetName);
+        }
+      </script>
+    </div>
+  `).setWidth(300).setHeight(320);
+
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, '🖨️ PDF Exporter');
+}
+
+function processPDFGeneration(mode, termName, targetName) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const termSheet = ss.getSheetByName(termName);
+    if (!termSheet) return 'Error: Term sheet not found.';
+
+    const data = termSheet.getRange(3, 1, Math.max(1, termSheet.getLastRow() - 2), 10).getValues();
+
+    // Filter matching rows
+    let rows = [];
+    if (mode === 'Teacher') {
+      rows = data.filter(r => r[2].toString().toLowerCase() === targetName.toLowerCase());
+    } else {
+      rows = data.filter(r => r[0].toString().toLowerCase() === targetName.toLowerCase());
+    }
+
+    if (!rows.length) return 'Error: No schedule found for ' + targetName;
+
+    return buildPDFTemplateSheetAndExport(mode, targetName, rows);
+  } catch (err) {
+    return 'Error: ' + err.toString();
+  }
+}
+
+function buildPDFTemplateSheetAndExport(mode, targetName, rows) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Create a temporary sheet
+  const tempName = 'TEMP_PDF_' + new Date().getTime();
+  const ts = ss.insertSheet(tempName);
+
+  try {
+    // 1. Setup Headers
+    if (mode === 'Teacher') {
+      ts.getRange('A1:G1').merge().setValue('Name of Teacher: ' + targetName.toUpperCase()).setFontWeight('bold').setFontSize(14);
+      // Try to find specialization from Phase 2
+      const teachList = ss.getSheetByName(CFG.TEACHER_ENROLL);
+      let spec = 'UNKNOWN';
+      if (teachList) {
+         const tData = teachList.getRange(3,2,teachList.getLastRow(), 2).getValues();
+         const match = tData.find(r => r[0].toString().toLowerCase() === targetName.toLowerCase());
+         if (match) spec = match[1];
+      }
+      ts.getRange('A2:G2').merge().setValue('Specialization: ' + spec).setFontWeight('bold').setFontSize(14);
+    } else {
+      ts.getRange('A1:G1').merge().setValue('Grade Level: ' + targetName).setFontWeight('bold').setFontSize(14);
+      ts.getRange('A2:G2').merge().setValue('Name of Adviser: ').setFontWeight('bold').setFontSize(14);
+    }
+
+    // 2. Setup Table Headers
+    const headers = ['TIME', 'NO. OF MINUTES', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY'];
+    ts.getRange('A4:G4').setValues([headers]).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setBorder(true,true,true,true,true,true);
+    ts.setColumnWidth(1, 100); ts.setColumnWidth(2, 90); ts.setColumnWidths(3, 5, 130);
+
+    // 3. Define Standard Timetable grid based on screenshots
+    const grid = [
+      { t: '7:00-7:30', m: 30, mon: 'Flag Raising\nCeremony', tue: 'GROUND PREPARATION/DAILY MORNING ROUTINE', wed: '', thu: '', fri: '', mergeSubj: true },
+      { t: '7:30-8:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '8:30-9:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '9:30-9:45', m: 15, mon: 'RECESS/GROUP HANDWASHING/TOOTH BRUSHING', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+      { t: '9:45-10:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '10:45-11:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '11:45-1:00', m: 75, mon: 'LUNCH BREAK', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+      { t: '1:00-2:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '1:00-2:30', m: 90, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+      { t: '2:00-3:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '2:30-3:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+      { t: '3:00-4:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '3:30-4:00', m: 30, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+    ];
+
+    // Determine if it's SHS or Standard grid based on row data
+    const isSHS = rows.some(r => {
+       const grMatch = r[0].toString().match(/\b(11|12)\b/);
+       return grMatch != null;
+    });
+
+    const activeGrid = grid.filter(g => {
+       if (isSHS) {
+         return !['1:00-2:00', '2:00-3:00', '3:00-4:00'].includes(g.t);
+       } else {
+         return !g.shs;
+       }
+    });
+
+    // 4. Map the data into the grid
+    let outputGrid = [];
+    const days = ['MON', 'TUE', 'WED', 'THU', 'FRI'];
+    const dIdx = { 'MON': 0, 'TUE': 1, 'WED': 2, 'THU': 3, 'FRI': 4 };
+
+    // Function to find matching schedule for a given time slot and day
+    const getSchedule = (timeStr, dayIndex) => {
+       const [inStr, outStr] = timeStr.split('-');
+       const sStart = parseTime(inStr.includes('AM') || inStr.includes('PM') ? inStr : inStr + (parseInt(inStr.split(':')[0]) < 7 || parseInt(inStr.split(':')[0]) === 12 ? ' PM' : ' AM'));
+
+       const matched = rows.find(r => {
+          if (r[3 + dayIndex] !== true) return false;
+          const rStart = parseTime(r[8]);
+          return Math.abs(rStart - sStart) < 15; // Match starts within 15 mins
+       });
+
+       if (!matched) return '';
+
+       if (mode === 'Teacher') {
+         return matched[1] + '\n' + matched[0]; // Subject + Grade Level
+       } else {
+         return matched[1] + '\n(' + matched[2] + ')'; // Subject + Teacher
+       }
+    };
+
+    activeGrid.forEach(g => {
+       let m = g.mon, t = g.tue, w = g.wed, th = g.thu, f = g.fri;
+
+       if (!g.mergeSubj) {
+          m = getSchedule(g.t, 0) || m;
+          t = getSchedule(g.t, 1) || t;
+          w = getSchedule(g.t, 2) || w;
+          th = getSchedule(g.t, 3) || th;
+          f = getSchedule(g.t, 4) || f;
+       }
+
+       outputGrid.push([g.t, g.m, m, t, w, th, f]);
+    });
+
+    ts.getRange(5, 1, outputGrid.length, 7).setValues(outputGrid).setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setBorder(true,true,true,true,true,true);
+
+    // Apply Merges for specific rows
+    for (let i = 0; i < activeGrid.length; i++) {
+       const r = 5 + i;
+       if (activeGrid[i].t === '7:00-7:30') { ts.getRange(r, 4, 1, 4).merge().setBackground('#d9d9d9'); ts.getRange(r, 3).setBackground('#d9d9d9'); }
+       if (activeGrid[i].t === '9:30-9:45') { ts.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+       if (activeGrid[i].t === '11:45-1:00') { ts.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+    }
+
+    // 5. Build PDF URL
+    SpreadsheetApp.flush();
+    const url = ss.getUrl().replace(/edit$/, '') + 'export?exportFormat=pdf&format=pdf' +
+      '&size=A4&portrait=false&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false' +
+      '&gridlines=false&fzr=false&gid=' + ts.getSheetId();
+
+    const token = ScriptApp.getOAuthToken();
+    const response = UrlFetchApp.fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+
+    const blob = response.getBlob().setName(targetName + '_Schedule.pdf');
+    const file = DriveApp.createFile(blob);
+
+    // Clean up
+    ss.deleteSheet(ts);
+
+    return file.getUrl();
+  } catch (err) {
+    if (ts) ss.deleteSheet(ts);
+    return 'Error creating PDF: ' + err.toString();
+  }
 }
