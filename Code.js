@@ -82,12 +82,19 @@ function onEdit(e) {
   }
 
   // 2. Dashboards Live Filter (Both Teacher and Section)
-  if ((sheetName === CFG.DASHBOARD || sheetName === CFG.SECTION_DASH) && col === 2 && row >= 2 && row <= 4) {
+  if (sheetName === CFG.SECTION_DASH && col === 2 && row >= 2 && row <= 4) {
     const sheet = e.range.getSheet();
     if (row === 3) { e.value === 'ALL WEEK' ? sheet.showColumns(5, 5) : sheet.hideColumns(5, 5); }
-    
-    if (sheetName === CFG.DASHBOARD) updateDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
-    if (sheetName === CFG.SECTION_DASH) updateSectionDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
+    updateSectionDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
+  }
+
+  if (sheetName === CFG.DASHBOARD && (col === 2 || col === 12) && row >= 2 && row <= 4) {
+    const sheet = e.range.getSheet();
+    if (row === 3) {
+      if (col === 2) { e.value === 'ALL WEEK' ? sheet.showColumns(5, 5) : sheet.hideColumns(5, 5); }
+      if (col === 12) { e.value === 'ALL WEEK' ? sheet.showColumns(15, 5) : sheet.hideColumns(15, 5); }
+    }
+    updateDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet(), col === 2 ? 1 : 2);
   }
 
   // 3. Conflict 1-Click "Implement" Auto-Fixer
@@ -695,16 +702,19 @@ function _makeConflict(a, b, type, severity, slot) {
 //  SECTION 5: DASHBOARD ENGINES (Teacher & Section)
 // ══════════════════════════════════════════════════════════════
 
-function updateDashboardUI(dash, ss) {
-  const teacher = dash.getRange('B2').getValue();
-  const day     = dash.getRange('B3').getValue();
-  const term    = dash.getRange('B4').getValue();
+function updateDashboardUI(dash, ss, pane = 1) {
+  const colOffset = pane === 1 ? 0 : 10; // Pane 1 is col 1, Pane 2 is col 11 (K)
+  const prefix = pane === 1 ? '' : '1';
+
+  const teacher = dash.getRange(2, 2 + colOffset).getValue();
+  const day     = dash.getRange(3, 2 + colOffset).getValue();
+  const term    = dash.getRange(4, 2 + colOffset).getValue();
 
   const maxR = dash.getMaxRows();
-  if (maxR > 5) dash.getRange(6, 1, maxR - 5, 9).clearContent().clearDataValidations().clearFormat();
+  if (maxR > 5) dash.getRange(6, 1 + colOffset, maxR - 5, 9).clearContent().clearDataValidations().clearFormat();
   
-  dash.getRange('C4').setValue('');
-  dash.getRange('E4').setValue('Select options...').setBackground(C.tealLight).setFontColor(C.teal);
+  dash.getRange(4, 3 + colOffset).setValue('');
+  dash.getRange(4, 5 + colOffset).setValue('Select options...').setBackground(C.tealLight).setFontColor(C.teal);
 
   if (!teacher || !term) return;
 
@@ -742,7 +752,7 @@ function updateDashboardUI(dash, ss) {
   output.sort((a, b) => parseTime(a[2]) - parseTime(b[2]));
 
   const totalHours = totalMins / 60;
-  dash.getRange('C4').setValue(totalHours);
+  dash.getRange(4, 3 + colOffset).setValue(totalHours);
 
   let statusText = '✅ Normal Load';
   let statusBg = C.okBg; let statusFg = C.ok;
@@ -759,23 +769,23 @@ function updateDashboardUI(dash, ss) {
     statusText = '⚪ No Load'; statusBg = C.navyLight; statusFg = C.muted;
   }
 
-  dash.getRange('C4').setBackground(statusBg).setFontColor(statusFg);
-  dash.getRange('E4').setValue(statusText).setBackground(statusBg).setFontColor(statusFg);
+  dash.getRange(4, 3 + colOffset).setBackground(statusBg).setFontColor(statusFg);
+  dash.getRange(4, 5 + colOffset).setValue(statusText).setBackground(statusBg).setFontColor(statusFg);
 
   if (!output.length) {
-    dash.getRange('A6:I6').merge().setValue('No schedule found for these criteria.').setFontStyle('italic').setFontColor(C.muted).setHorizontalAlignment('center');
+    dash.getRange(6, 1 + colOffset, 1, 9).merge().setValue('No schedule found for these criteria.').setFontStyle('italic').setFontColor(C.muted).setHorizontalAlignment('center');
     return;
   }
 
-  dash.getRange(6, 1, output.length, 9).setValues(output);
+  dash.getRange(6, 1 + colOffset, output.length, 9).setValues(output);
   for (let r = 0; r < output.length; r++) {
-    dash.getRange(6 + r, 1, 1, 9).setBackground(r % 2 === 0 ? C.white : C.rowAlt).setFontColor(C.body);
+    dash.getRange(6 + r, 1 + colOffset, 1, 9).setBackground(r % 2 === 0 ? C.white : C.rowAlt).setFontColor(C.body);
   }
-  dash.getRange(6, 2, output.length, 1).setHorizontalAlignment('center');
-  dash.getRange(6, 3, output.length, 2).setNumberFormat('h:mm AM/PM').setHorizontalAlignment('center');
+  dash.getRange(6, 2 + colOffset, output.length, 1).setHorizontalAlignment('center');
+  dash.getRange(6, 3 + colOffset, output.length, 2).setNumberFormat('h:mm AM/PM').setHorizontalAlignment('center');
   if (isWeekly) {
     const rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
-    dash.getRange(6, 5, output.length, 5).setDataValidation(rule).setHorizontalAlignment('center');
+    dash.getRange(6, 5 + colOffset, output.length, 5).setDataValidation(rule).setHorizontalAlignment('center');
   }
 }
 
@@ -929,7 +939,10 @@ function updateTeacherNameDropdowns() {
   const rule = SpreadsheetApp.newDataValidation().requireValueInRange(enrollSheet.getRange('B3:B1000'), true).build();
   
   if (assignSheet) assignSheet.getRange('A3:A1000').setDataValidation(rule);
-  if (dashSheet) dashSheet.getRange('B2').setDataValidation(rule); 
+  if (dashSheet) {
+    dashSheet.getRange('B2').setDataValidation(rule);
+    dashSheet.getRange('L2').setDataValidation(rule);
+  }
 }
 
 function updateTeacherDropdownOptions() {
@@ -1040,31 +1053,53 @@ function buildPhase4Dashboard() {
   let dash = ss.getSheetByName(CFG.DASHBOARD) || ss.insertSheet(CFG.DASHBOARD, 1); 
   dash.clear();
 
-  dash.getRange('A1:I1').merge().setValue('🏫 FACULTY LOADING — TEACHER SCHEDULE VIEWER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  dash.getRange('A1:S1').merge().setValue('🏫 FACULTY LOADING — DUAL TEACHER COMPARISON VIEWER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
   dash.setRowHeight(1, 46);
 
   const lbl = (cell, text) => dash.getRange(cell).setValue(text).setFontWeight('bold').setHorizontalAlignment('right').setFontColor(C.navy);
-  lbl('A2', '👤 Teacher'); lbl('A3', '📅 Day Filter'); lbl('A4', '📑 Term');
-  dash.getRange('D4').setValue('Status').setFontColor(C.muted).setFontSize(10).setHorizontalAlignment('right');
-
   const inputBox = (a1, bg) => dash.getRange(a1).setBackground(bg).setBorder(true,true,true,true,null,null,C.border,SpreadsheetApp.BorderStyle.SOLID).setFontColor(C.navy);
+
+  // Pane 1 (Left)
+  lbl('A2', '👤 Teacher 1'); lbl('A3', '📅 Day Filter'); lbl('A4', '📑 Term');
+  dash.getRange('D4').setValue('Status').setFontColor(C.muted).setFontSize(10).setHorizontalAlignment('right');
   inputBox('B2', C.navyLight); inputBox('B3', C.navyLight); inputBox('B4', C.navyLight);
   inputBox('C4', C.tealLight).setNumberFormat('0.0 "hrs"').setFontWeight('bold'); 
   inputBox('E4', C.tealLight).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center'); 
-  dash.setRowHeights(2, 3, 28);
 
   dash.getRange('B3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).build()).setValue('ALL WEEK');
   dash.getRange('B4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setValue(CFG.TERMS[0]);
 
   dash.getRange('A5:I5').setValues([['Subject','Grade Level','Time In','Time Out','MON','TUE','WED','THU','FRI']]).setFontWeight('bold').setFontSize(10).setBackground(C.navy).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+
+  // Spacer
+  dash.setColumnWidth(10, 20);
+  dash.getRange('J2:J1000').setBackground(C.navyLight);
+
+  // Pane 2 (Right)
+  lbl('K2', '👤 Teacher 2'); lbl('K3', '📅 Day Filter'); lbl('K4', '📑 Term');
+  dash.getRange('N4').setValue('Status').setFontColor(C.muted).setFontSize(10).setHorizontalAlignment('right');
+  inputBox('L2', C.navyLight); inputBox('L3', C.navyLight); inputBox('L4', C.navyLight);
+  inputBox('M4', C.tealLight).setNumberFormat('0.0 "hrs"').setFontWeight('bold');
+  inputBox('O4', C.tealLight).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center');
+
+  dash.getRange('L3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).build()).setValue('ALL WEEK');
+  dash.getRange('L4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setValue(CFG.TERMS[0]);
+
+  dash.getRange('K5:S5').setValues([['Subject','Grade Level','Time In','Time Out','MON','TUE','WED','THU','FRI']]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+
+  dash.setRowHeights(2, 3, 28);
   dash.setRowHeight(5, 30);
   
   dash.setColumnWidth(1, 260); dash.setColumnWidth(2, 130); dash.setColumnWidths(3, 2, 110); dash.setColumnWidths(5, 5, 52);
+  dash.setColumnWidth(11, 260); dash.setColumnWidth(12, 130); dash.setColumnWidths(13, 2, 110); dash.setColumnWidths(15, 5, 52);
+
   dash.getRange('C6:D').setNumberFormat('h:mm AM/PM');
-  dash.setFrozenRows(5); dash.showColumns(5, 5);
+  dash.getRange('M6:N').setNumberFormat('h:mm AM/PM');
+
+  dash.setFrozenRows(5); dash.showColumns(5, 5); dash.showColumns(15, 5);
   updateTeacherNameDropdowns();
 
-  ss.toast('Teacher Dashboard fully constructed.', '✅ Phase 4 Complete', 5);
+  ss.toast('Dual Teacher Dashboard fully constructed.', '✅ Phase 4 Complete', 5);
 }
 
 function buildPhase5ConflictReport() {
