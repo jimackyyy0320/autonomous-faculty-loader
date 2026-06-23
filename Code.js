@@ -60,7 +60,7 @@ function onOpen() {
     .addItem('7️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer') // NEW VISUALIZER
     .addSeparator()
     .addItem('🚀 RUN AUTO-SCHEDULER', 'runAutoScheduler')
-    .addItem('🔄 RECALCULATE SCHEDULE', 'runAutoScheduler')
+    .addItem('🔄 RECALCULATE SCHEDULE', 'runRecalculateSchedule')
     .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
     .addSeparator()
     .addItem('🖨️ Generate Schedule PDF', 'generateScheduleUI')
@@ -113,7 +113,11 @@ function onEdit(e) {
 //  SECTION 3: AUTO-SCHEDULER (The Super-Advanced Brain)
 // ══════════════════════════════════════════════════════════════
 
-function runAutoScheduler() {
+function runRecalculateSchedule() {
+  runAutoScheduler(true);
+}
+
+function runAutoScheduler(isReshuffle = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
   const assignSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
@@ -190,6 +194,11 @@ function runAutoScheduler() {
       const secB = b[1].toString().trim();
       if (secA !== secB) return secA.localeCompare(secB);
 
+      // If reshuffling, randomly sort tied subjects within a section to vary the output days
+      if (isReshuffle) {
+         return Math.random() - 0.5;
+      }
+
       return (parseFloat(b[3]) || 0) - (parseFloat(a[3]) || 0);
     });
 
@@ -249,11 +258,17 @@ function runAutoScheduler() {
       let slotsAcquired = [];
       let rowWarnings = [];
       let daysUsedForSubject = new Set();
+      // Track if a teacher has met this section today
+      if (!tBooked[teacher].sectionsMet) tBooked[teacher].sectionsMet = { 1:new Set(), 2:new Set(), 3:new Set(), 4:new Set(), 5:new Set() };
 
       const isFree = (day, slot, checkPreferred = true) => {
         const tConflict = tBooked[teacher][day].some(b => slot.s < b.e && slot.e > b.s);
         const cConflict = cBooked[section][day].some(b => slot.s < b.e && slot.e > b.s);
         if (tConflict || cConflict) return false;
+
+        if (grade <= 10 && !isHomeroom) {
+            if (tBooked[teacher].sectionsMet && tBooked[teacher].sectionsMet[day].has(section)) return false;
+        }
 
         if (checkPreferred && !isHomeroom) {
             const isMorning = slot.s < 720;
@@ -292,6 +307,7 @@ function runAutoScheduler() {
         slotsAcquired.push({ day, in: slot.in, out: actualOut, s: slot.s, e: actualE });
         hoursLeft -= dur;
         daysUsedForSubject.add(day);
+        if (tBooked[teacher].sectionsMet) tBooked[teacher].sectionsMet[day].add(section);
       };
 
       for (let day of prefDays) {
