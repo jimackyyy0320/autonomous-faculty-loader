@@ -218,6 +218,9 @@ function runAutoScheduler(isReshuffle = false) {
       });
     });
 
+    const sectionKeys = Object.keys(sectionDemands);
+    if (isReshuffle) sectionKeys.sort(() => Math.random() - 0.5);
+
     // DISTRIBUTE UNASSIGNED SUBJECTS (Cross-Specialization Load Balancing)
     let teacherWeeklyHours = {};
     teachers.forEach(t => { if (t[1]) teacherWeeklyHours[t[1]] = 0; });
@@ -283,8 +286,6 @@ function runAutoScheduler(isReshuffle = false) {
     // We iterate over every Section, then Day, then Time. We strictly map gaps.
 
     // Sort sections so reshuffle affects evaluation order
-    const sectionKeys = Object.keys(sectionDemands);
-    if (isReshuffle) sectionKeys.sort(() => Math.random() - 0.5);
 
     sectionKeys.forEach(section => {
        const demands = sectionDemands[section];
