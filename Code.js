@@ -25,8 +25,8 @@ const CFG = {
   LUNCH_END:         780,  // 1:00 PM
   WEEKLY_WARN_HOURS: 28,
   WEEKLY_HARD_HOURS: 30,
-  DAILY_PREFERRED_HOURS: 5.5,
-  DAILY_WARN_HOURS:  5.5,
+  DAILY_PREFERRED_HOURS: 4.5,
+  DAILY_WARN_HOURS:  4.5,
   DAILY_HARD_HOURS:  6,
   SLOT_STEP:         30,
   SCHOOL_START:      450,  // 7:30 AM
@@ -118,10 +118,10 @@ function runAutoScheduler(isReshuffle = false) {
   const enrollSheet = ss.getSheetByName(CFG.TEACHER_ENROLL);
 
   if (!subSheet || !assignSheet || !enrollSheet) {
-    return ss.toast('Please ensure your Subject Loading, Teacher Assignment, and Teacher Enrollment tabs are set up first.', '👋 Just a quick note', 5);
+    return ss.toast('Please ensure your Data tabs are set up first.', '👋 Note', 5);
   }
 
-  ss.toast('Running advanced multi-pass algorithm with bottleneck detection...', '🧠 Computing', 4);
+  ss.toast('Running Strict Timeline-First Algorithm...', '🧠 Computing', 4);
 
   const getSafeData = (sheet, numCols) => {
     const lr = sheet.getLastRow();
@@ -148,26 +148,8 @@ function runAutoScheduler(isReshuffle = false) {
     }
   });
 
-  const STANDARD_SLOTS = [
-    { in: '7:30 AM',  out: '8:30 AM',  s: 450, e: 510 },
-    { in: '8:30 AM',  out: '9:30 AM',  s: 510, e: 570 },
-    { in: '9:45 AM',  out: '10:45 AM', s: 585, e: 645 },
-    { in: '10:45 AM', out: '11:45 AM', s: 645, e: 705 },
-    { in: '1:00 PM',  out: '2:00 PM',  s: 780, e: 840 },
-    { in: '2:00 PM',  out: '3:00 PM',  s: 840, e: 900 },
-    { in: '3:00 PM',  out: '4:00 PM',  s: 900, e: 960 }
-  ];
-
-  const SHS_SLOTS = [
-    { in: '7:30 AM',  out: '8:30 AM',  s: 450, e: 510 },
-    { in: '8:30 AM',  out: '9:30 AM',  s: 510, e: 570 },
-    { in: '9:45 AM',  out: '10:45 AM', s: 585, e: 645 },
-    { in: '10:45 AM', out: '11:45 AM', s: 645, e: 705 },
-    { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
-    { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
-  ];
-
   let unmappedLog = [];
+  const props = PropertiesService.getDocumentProperties();
 
   CFG.TERMS.forEach(term => {
     const termDemands = demands.filter(d => d[0] === term);
@@ -175,245 +157,297 @@ function runAutoScheduler(isReshuffle = false) {
 
     const tBooked = {};
     const tBookedMins = {};
+    const tBookedSubjects = {}; // Tracks { day: Set(subject_section) } for non-consecutive rules
     const cBooked = {};
     const outputRows = [];
 
-    termDemands.sort((a, b) => {
-      const isAHomeroom = a[2].toString().toLowerCase().includes('homeroom') ? 1 : 0;
-      const isBHomeroom = b[2].toString().toLowerCase().includes('homeroom') ? 1 : 0;
-      if (isAHomeroom !== isBHomeroom) return isBHomeroom - isAHomeroom;
-
-      const secA = a[1].toString().trim();
-      const secB = b[1].toString().trim();
-      if (secA !== secB) return secA.localeCompare(secB);
-
-      if (isReshuffle) {
-         return Math.random() - 0.5;
-      }
-
-      return (parseFloat(b[3]) || 0) - (parseFloat(a[3]) || 0);
-    });
-
-    const props = PropertiesService.getDocumentProperties();
-
+    // Initialize tracking structures
+    const sectionDemands = {};
     termDemands.forEach(d => {
-      const section = d[1].toString().trim();
-      const subject = d[2].toString().trim();
-      let hoursLeft = parseFloat(d[3]) || 0;
-      const originalHours = hoursLeft;
+      const sec = d[1].toString().trim();
+      const subj = d[2].toString().trim();
+      const hrs = parseFloat(d[3]) || 0;
 
-      const learnedTeacher = props.getProperty('LEARNED_' + subject + '|' + section);
-      const teacher = learnedTeacher || assignMap[`${subject}|${section}`] || '⚠️ Unassigned';
+      const learnedTeacher = props.getProperty('LEARNED_' + subj + '|' + sec);
+      const teacher = learnedTeacher || assignMap[`${subj}|${sec}`] || '⚠️ Unassigned';
 
       if (!tBooked[teacher] && teacher !== 'Unavailable Teacher' && teacher !== '⚠️ Unassigned') {
           tBooked[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[], sectionsMet: { 1:new Set(), 2:new Set(), 3:new Set(), 4:new Set(), 5:new Set() } };
           tBookedMins[teacher] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
+          tBookedSubjects[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
       }
-      if (!cBooked[section]) cBooked[section] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
+      if (!cBooked[sec]) cBooked[sec] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
 
-      const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
+      if (!sectionDemands[sec]) sectionDemands[sec] = [];
+
+      // Determine Duration Logic
+      const isPhilGov = subj.toLowerCase().includes('phil gov') || subj.toLowerCase().includes('philippine politics');
+      const gradeMatch = sec.match(/\b(11|12|7|8|9|10)\b/);
       const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
 
-      let candidateSlots = grade >= 11 ? SHS_SLOTS : STANDARD_SLOTS;
+      let durationMins = 60; // Default 1 hour
+      if (isPhilGov) durationMins = 90;
+      else if (hrs % 1 === 0.5) durationMins = 90; // Fractional weekly hours end in .5 -> 90 mins
 
-      const isPhilGov = subject.toLowerCase().includes('phil gov') || subject.toLowerCase().includes('philippine politics');
-      if (isPhilGov) {
-        candidateSlots = [
-          { in: '7:30 AM',  out: '9:00 AM',  s: 450, e: 540 },
-          { in: '9:00 AM',  out: '10:30 AM', s: 540, e: 630 },
-          { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
-          { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
-        ];
-      }
+      const isAral = subj.match(/\bARAL\b/i) && !subj.toLowerCase().includes('panlipunan');
+      if (isAral) durationMins = 60; // ARAL exactly 1 hour
 
-      let prefDays = [1,2,3,4,5];
-      if (isReshuffle) prefDays = prefDays.sort(() => Math.random() - 0.5);
+      const isHomeroom = subj.toLowerCase().includes('homeroom');
 
-      const isHomeroom = subject.toLowerCase().includes('homeroom');
-      const isAralEnd = subject.match(/\bARAL\b/i) && !subject.toLowerCase().includes('panlipunan');
+      sectionDemands[sec].push({
+         subject: subj,
+         teacher: teacher,
+         hoursLeft: hrs,
+         originalHours: hrs,
+         durationMins: durationMins,
+         isAral: isAral,
+         isHomeroom: isHomeroom,
+         grade: grade,
+         slotsAcquired: []
+      });
+    });
 
-      if (isAralEnd) candidateSlots = [{ in: '3:00 PM',  out: '4:00 PM',  s: 900, e: 960 }];
+    // TIMELINE-FIRST SCHEDULING (Dense Packing)
+    // We iterate over every Section, then Day, then Time. We strictly map gaps.
 
-      if (isHomeroom) {
-        prefDays = [1];
-        if (grade >= 11) candidateSlots = [{ in: '3:30 PM', out: '4:30 PM', s: 930, e: 990 }, { in: '3:00 PM', out: '4:00 PM', s: 900, e: 960 }];
-        else candidateSlots = [ { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 } ];
-      } else {
-        if (isPhilGov && hoursLeft === 3) prefDays = [2, 4];
-        else if (hoursLeft === 4) prefDays = [1,2,4,5];
-        else if (hoursLeft === 3) prefDays = [1,3,5];
-        else if (hoursLeft === 2) prefDays = [2,4];
-        else if (hoursLeft === 1) prefDays = [3];
-        if (isReshuffle) prefDays = prefDays.sort(() => Math.random() - 0.5);
-      }
+    // Sort sections so reshuffle affects evaluation order
+    const sectionKeys = Object.keys(sectionDemands);
+    if (isReshuffle) sectionKeys.sort(() => Math.random() - 0.5);
 
-      let slotsAcquired = [];
-      let rowWarnings = [];
-      let daysUsedForSubject = new Set();
+    sectionKeys.forEach(section => {
+       const demands = sectionDemands[section];
+       const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
+       const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
 
-      const attemptBook = (dayPool, checkPreferred, allowUnavailable = false) => {
-         for (let slot of candidateSlots) {
-           if (hoursLeft <= 0) break;
-           for (let day of dayPool) {
-             if (hoursLeft <= 0) break;
-             if (daysUsedForSubject.has(day) && !isHomeroom) continue;
+       // Pre-map Homeroom strictly
+       demands.forEach(d => {
+         if (d.isHomeroom && d.hoursLeft > 0) {
+            const day = 1; // Monday
+            let sStart = 450; // 7:30 AM
+            if (grade >= 11) sStart = 900; // 3:00 PM
+            const sEnd = sStart + 60;
 
-             // Section MUST be free
-             if (cBooked[section][day].some(b => slot.s < b.e && slot.e > b.s)) continue;
+            cBooked[section][day].push({s: sStart, e: sEnd, subject: d.subject});
+            if (tBooked[d.teacher]) {
+               tBooked[d.teacher][day].push({s: sStart, e: sEnd});
+               tBookedMins[d.teacher][day] += 60;
+               tBooked[d.teacher].sectionsMet[day].add(section);
+            }
+            d.slotsAcquired.push({ day, in: formatMinsToTime(sStart), out: formatMinsToTime(sEnd), s: sStart, e: sEnd, assignedT: d.teacher });
+            d.hoursLeft -= 1;
+         }
+       });
 
-             // Strict Gapless Plotting for JHS (Grades 7-10)
-             if (grade <= 10 && checkPreferred && !isHomeroom) {
-                if (slot.s > 450) { // If not the first slot of the day (7:30 AM)
-                   let expectedEndBeforeThis = slot.s;
-                   if (slot.s === 585) expectedEndBeforeThis = 570; // after recess
-                   if (slot.s === 780) expectedEndBeforeThis = 705; // after lunch
+       let days = [1,2,3,4,5];
+       if (isReshuffle) days.sort(() => Math.random() - 0.5);
 
-                   let hasPrecedingClass = false;
-                   cBooked[section][day].forEach(b => {
-                      if (b.e === expectedEndBeforeThis) hasPrecedingClass = true;
-                   });
+       days.forEach(day => {
+          let time = 450; // Start at 7:30 AM
 
-                   // If the section HAS ANY classes on this day, and is missing the preceding class, it's a gap!
-                   if (cBooked[section][day].length > 0 && !hasPrecedingClass) {
-                       continue; // Reject slot to prevent student gap
+          while (time < CFG.SCHOOL_END) { // Until 4:30 PM
+             // Skip pre-booked slots (like homeroom or manually inserted things)
+             const existingBlock = cBooked[section][day].find(b => time >= b.s && time < b.e);
+             if (existingBlock) {
+                 time = existingBlock.e;
+                 continue;
+             }
+
+             // Handle Recess (9:30 AM - 9:45 AM = 570-585)
+             if (time === 570) { time = 585; continue; }
+             // Handle Lunch (11:45 AM - 1:00 PM = 705-780)
+             if (time === 705) { time = 780; continue; }
+
+             // Find the best subject to fit in this time slot to guarantee dense packing
+             // We want to avoid skipping. If no subject perfectly fits, we MUST map an "Unavailable Teacher"
+             // to the best matching subject to maintain dense packing.
+
+             let validCandidates = demands.filter(d => d.hoursLeft > 0);
+             if (validCandidates.length === 0) break; // Finished schedule for section
+
+             // Filter by Hard Constraints
+             let bestSubj = null;
+             let bestScore = -Infinity;
+             let forceUnavailable = false;
+
+             validCandidates.forEach(d => {
+                let score = 100;
+                let tBlocked = false;
+                let sBlocked = false; // Section blocked by logical constraint (not time conflict)
+
+                // 1. Durations & Boundaries
+                let blockDur = d.durationMins;
+                if (d.hoursLeft * 60 < blockDur) blockDur = d.hoursLeft * 60; // Truncate last block
+                const endTime = time + blockDur;
+
+                // Crosses Recess or Lunch boundary? Invalid.
+                if (time < 570 && endTime > 570) sBlocked = true;
+                if (time < 705 && endTime > 705) sBlocked = true;
+                if (endTime > CFG.SCHOOL_END) sBlocked = true;
+
+                // 2. ARAL Placement (Must be exactly 3:00 PM - 4:00 PM)
+                if (d.isAral && time !== 900) sBlocked = true;
+                if (!d.isAral && time === 900) {
+                   // If another subject tries to take 3-4 PM, check if ARAL still needs it.
+                   const aralNeeds = demands.some(a => a.isAral && a.hoursLeft > 0);
+                   if (aralNeeds) score -= 1000; // Leave 3PM open for ARAL
+                }
+
+                // 3. G7-10 Meeting Frequency
+                const alreadyMetToday = cBooked[section][day].some(b => b.subject === d.subject);
+                if (grade <= 10 && alreadyMetToday) sBlocked = true;
+
+                // 4. G11-12 Consecutive Check
+                if (grade >= 11 && alreadyMetToday) {
+                   // Allowed to meet 2x, but NOT consecutively.
+                   const prevBlock = cBooked[section][day].find(b => b.subject === d.subject);
+                   if (prevBlock && (prevBlock.e === time || prevBlock.s === endTime)) {
+                       sBlocked = true; // Back to back
                    }
                 }
-             }
 
-             let tBlocked = false;
-             if (teacher !== '⚠️ Unassigned' && teacher !== 'Unavailable Teacher' && tBooked[teacher]) {
-                 if (tBooked[teacher][day].some(b => slot.s < b.e && slot.e > b.s)) tBlocked = true;
+                if (sBlocked) return; // Cannot evaluate this subject for this slot
 
-                 if (!tBlocked && grade <= 10 && !isHomeroom) {
-                     if (tBooked[teacher].sectionsMet[day].has(section)) tBlocked = true;
-                 }
+                // Evaluate Teacher Constraints
+                const t = d.teacher;
+                if (t === '⚠️ Unassigned' || t === 'Unavailable Teacher') tBlocked = true;
+                else if (tBooked[t]) {
+                   // Time conflict
+                   if (tBooked[t][day].some(b => time < b.e && endTime > b.s)) tBlocked = true;
 
-                 if (!tBlocked && !isHomeroom) {
-                     const isMorning = slot.s < 720;
-                     let halfDayMins = 0;
-                     tBooked[teacher][day].forEach(b => {
-                         if (isMorning && b.s < 720) halfDayMins += (b.e - b.s);
-                         else if (!isMorning && b.s >= 720) halfDayMins += (b.e - b.s);
-                     });
-                     if (checkPreferred && halfDayMins + (slot.e - slot.s) > 3 * 60) tBlocked = true;
+                   // G7-10 Advisory Frequency for Teacher (Fix: Check if this teacher is the section's homeroom adviser)
+                   // The homeroom teacher for a section is mapped early. Let's determine if 't' is the homeroom teacher.
+                   const isAdviser = demands.some(x => x.isHomeroom && x.teacher === t);
+                   if (grade <= 10 && isAdviser && tBooked[t].sectionsMet[day].has(section)) tBlocked = true;
 
-                     const duration = slot.e - slot.s;
-                     if (checkPreferred) {
-                         if (tBookedMins[teacher][day] + duration > CFG.DAILY_PREFERRED_HOURS * 60) tBlocked = true;
-                     } else {
-                         if (tBookedMins[teacher][day] + duration > CFG.DAILY_HARD_HOURS * 60) tBlocked = true;
-                     }
-                 }
+                   // 6-Hour Hard Limit
+                   if (tBookedMins[t][day] + blockDur > CFG.DAILY_HARD_HOURS * 60) tBlocked = true;
+
+                   // Soft Constraints (Heuristics) if teacher is free
+                   if (!tBlocked) {
+                       // Prefer < 5 hours (4.5h config)
+                       if (tBookedMins[t][day] + blockDur > CFG.DAILY_PREFERRED_HOURS * 60) score -= 50;
+
+                       // Teacher Prep Time: Penalize back-to-back
+                       const hasBackToBack = tBooked[t][day].some(b => b.e === time || b.s === endTime);
+                       if (hasBackToBack) score -= 20;
+
+                       // Perfect Block: Was it scheduled at this time on previous days?
+                       let sameTimeCount = 0;
+                       d.slotsAcquired.forEach(sa => {
+                          if (sa.s === time) sameTimeCount++;
+                       });
+                       score += sameTimeCount * 15;
+                   }
+                }
+
+                if (tBlocked) score -= 1000; // FIX: Heavily penalize blocked teachers so they never win against valid soft-penalties
+
+                // Sort weighting
+                score += d.hoursLeft * 2; // Prioritize heavier subjects
+
+                if (score > bestScore) {
+                   bestScore = score;
+                   bestSubj = d;
+                   forceUnavailable = tBlocked;
+                }
+             });
+
+             if (bestSubj) {
+                // Book it!
+                const bDur = Math.min(bestSubj.durationMins, bestSubj.hoursLeft * 60);
+                const eTime = time + bDur;
+
+                const finalTeacher = forceUnavailable ? 'Unavailable Teacher' : bestSubj.teacher;
+
+                cBooked[section][day].push({s: time, e: eTime, subject: bestSubj.subject});
+
+                if (finalTeacher !== 'Unavailable Teacher' && tBooked[finalTeacher]) {
+                    tBooked[finalTeacher][day].push({s: time, e: eTime});
+                    tBookedMins[finalTeacher][day] += bDur;
+                    tBooked[finalTeacher].sectionsMet[day].add(section);
+                }
+
+                bestSubj.slotsAcquired.push({
+                   day: day, in: formatMinsToTime(time), out: formatMinsToTime(eTime),
+                   s: time, e: eTime, assignedT: finalTeacher
+                });
+
+                bestSubj.hoursLeft -= (bDur / 60);
+                time = eTime; // Advance time
              } else {
-                 tBlocked = true; // Auto block if unassigned
+                // No subject could legally fit here (e.g. ARAL constraints, etc.)
+                // To maintain dense packing, we are forced to skip the time slot. This is a severe bottleneck.
+                time += 30; // Advance time to try next slot
              }
+          }
+       });
+    });
 
-             const bookSlot = (d, s, assignedT) => {
-                 let dur = (s.e - s.s) / 60;
-                 let actualE = s.e;
-                 let actualOut = s.out;
-                 if (hoursLeft < dur) {
-                     actualE = s.s + Math.round(hoursLeft * 60);
-                     actualOut = formatMinsToTime(actualE);
-                     dur = hoursLeft;
-                 }
+    // Process output rows
+    sectionKeys.forEach(section => {
+       const demands = sectionDemands[section];
+       demands.forEach(d => {
+          if (d.hoursLeft > 0) {
+            unmappedLog.push(`[${term}] ${d.subject} (${section}) — ${d.hoursLeft}h unmapped. No physical slots left in week.`);
+          }
 
-                 if (assignedT !== 'Unavailable Teacher' && assignedT !== '⚠️ Unassigned' && tBooked[assignedT]) {
-                    tBooked[assignedT][d].push({s: s.s, e: actualE});
-                    tBookedMins[assignedT][d] += (actualE - s.s);
-                    tBooked[assignedT].sectionsMet[d].add(section);
-                 }
+          const grouped = {};
+          d.slotsAcquired.forEach(sa => {
+            const key = sa.in + '|' + sa.out + '|' + sa.assignedT;
+            if (!grouped[key]) grouped[key] = { m:false, t:false, w:false, th:false, f:false, in: sa.in, out: sa.out, finalTeacher: sa.assignedT };
+            if (sa.day === 1) grouped[key].m = true;
+            if (sa.day === 2) grouped[key].t = true;
+            if (sa.day === 3) grouped[key].w = true;
+            if (sa.day === 4) grouped[key].th = true;
+            if (sa.day === 5) grouped[key].f = true;
+          });
 
-                 cBooked[section][d].push({s: s.s, e: actualE});
-                 slotsAcquired.push({ day: d, in: s.in, out: actualOut, s: s.s, e: actualE, assignedT });
-                 hoursLeft -= dur;
-                 daysUsedForSubject.add(d);
-             };
-
-             if (!tBlocked) {
-                 bookSlot(day, slot, teacher);
-             } else if (allowUnavailable) {
-                 bookSlot(day, slot, 'Unavailable Teacher');
-                 if (!rowWarnings.includes('🔴 Teacher Conflict')) rowWarnings.push('🔴 Teacher Conflict');
-             }
-           }
-         }
-      };
-
-      attemptBook(prefDays, true, false);
-      if (hoursLeft > 0 && !isHomeroom) attemptBook([1,2,3,4,5], true, false);
-
-      if (hoursLeft > 0) attemptBook(prefDays, false, false);
-      if (hoursLeft > 0 && !isHomeroom) attemptBook([1,2,3,4,5], false, false);
-
-      if (hoursLeft > 0) attemptBook(prefDays, false, true);
-      if (hoursLeft > 0 && !isHomeroom) attemptBook([1,2,3,4,5], false, true);
-
-      if (hoursLeft > 0) {
-        const warnStr = `🔴 Overlap/Unmapped ${hoursLeft}h`;
-        unmappedLog.push(`[${term}] ${subject} (${section}) — Mapped ${originalHours - hoursLeft}/${originalHours} hrs.`);
-        if (!rowWarnings.includes(warnStr)) rowWarnings.push(warnStr);
-      }
-
-      const grouped = {};
-      slotsAcquired.forEach(sa => {
-        const key = sa.in + '|' + sa.out + '|' + sa.assignedT;
-        if (!grouped[key]) grouped[key] = { m:false, t:false, w:false, th:false, f:false, in: sa.in, out: sa.out, finalTeacher: sa.assignedT };
-        if (sa.day === 1) grouped[key].m = true;
-        if (sa.day === 2) grouped[key].t = true;
-        if (sa.day === 3) grouped[key].w = true;
-        if (sa.day === 4) grouped[key].th = true;
-        if (sa.day === 5) grouped[key].f = true;
-      });
-
-      const warningText = rowWarnings.join(', ');
-
-      let suggestions = [];
-      const subjLower = subject.toLowerCase();
-      teachers.forEach(t => {
-        const spec = t[2].toString().toLowerCase();
-        if (spec && (subjLower.includes(spec) || spec.includes(subjLower))) {
-          suggestions.push(t[1]);
-        }
-      });
-      if (suggestions.length === 0) {
-        teachers.forEach(t => {
-          const spec = t[2].toString().toLowerCase();
-          const words = subjLower.split(' ').filter(w => w.length > 3);
-          if (words.some(w => spec.includes(w))) suggestions.push(t[1]);
-        });
-      }
-      const suggStr = suggestions.length > 0 ? suggestions.slice(0, 3).join(', ') : 'Any Teacher';
-
-      Object.values(grouped).forEach(g => {
-        let refinedSugg = suggStr;
-        if (g.finalTeacher === 'Unavailable Teacher') {
-            const startMins = parseTime(g.in);
-            const endMins = parseTime(g.out);
-            const activeDays = [];
-            if (g.m) activeDays.push(1);
-            if (g.t) activeDays.push(2);
-            if (g.w) activeDays.push(3);
-            if (g.th) activeDays.push(4);
-            if (g.f) activeDays.push(5);
-
-            let trulyFree = [];
-            suggestions.forEach(tName => {
-               let isBlocked = false;
-               if (!tBooked[tName]) return;
-               activeDays.forEach(d => {
-                  if (tBooked[tName][d].some(b => startMins < b.e && endMins > b.s)) isBlocked = true;
-               });
-               if (!isBlocked) trulyFree.push(tName);
-            });
-
-            if (trulyFree.length > 0) {
-               refinedSugg = '★ ' + trulyFree.slice(0, 3).join(', ');
+          // Teacher Suggestions Based on Major
+          let suggestions = [];
+          const subjLower = d.subject.toLowerCase();
+          teachers.forEach(t => {
+            const spec = t[2].toString().toLowerCase();
+            if (spec && (subjLower.includes(spec) || spec.includes(subjLower))) {
+              suggestions.push(t[1]);
             }
-        }
+          });
+          if (suggestions.length === 0) {
+            teachers.forEach(t => {
+              const spec = t[2].toString().toLowerCase();
+              const words = subjLower.split(' ').filter(w => w.length > 3);
+              if (words.some(w => spec.includes(w))) suggestions.push(t[1]);
+            });
+          }
+          const suggStr = suggestions.length > 0 ? suggestions.slice(0, 3).join(', ') : 'Any Teacher';
 
-        outputRows.push([section, subject, g.finalTeacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out, '—', warningText, refinedSugg]);
-      });
+          Object.values(grouped).forEach(g => {
+            let refinedSugg = suggStr;
+            let warn = '';
+            if (g.finalTeacher === 'Unavailable Teacher') {
+                warn = '🔴 Teacher Conflict';
+                // Find strictly free teachers
+                const startMins = parseTime(g.in);
+                const endMins = parseTime(g.out);
+                const activeDays = [];
+                if (g.m) activeDays.push(1); if (g.t) activeDays.push(2); if (g.w) activeDays.push(3); if (g.th) activeDays.push(4); if (g.f) activeDays.push(5);
+
+                let trulyFree = [];
+                suggestions.forEach(tName => {
+                   let isBlocked = false;
+                   if (!tBooked[tName]) return;
+                   activeDays.forEach(day => {
+                      if (tBooked[tName][day].some(b => startMins < b.e && endMins > b.s)) isBlocked = true;
+                      // Enforce 6h limit for suggestion
+                      if (tBookedMins[tName][day] + (endMins - startMins) > CFG.DAILY_HARD_HOURS * 60) isBlocked = true;
+                   });
+                   if (!isBlocked) trulyFree.push(tName);
+                });
+                if (trulyFree.length > 0) refinedSugg = '★ ' + trulyFree.slice(0, 3).join(', ');
+            }
+
+            outputRows.push([section, d.subject, g.finalTeacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out, '—', warn, refinedSugg]);
+          });
+       });
     });
 
     const ts = ss.getSheetByName(term);
@@ -429,7 +463,7 @@ function runAutoScheduler(isReshuffle = false) {
     const ui = SpreadsheetApp.getUi();
     ui.alert(
       '⚠️ Timetable Adjustments Required',
-      'Some teachers had physical limits that blocked their assignments. They have been replaced with "Unavailable Teacher" to preserve the students schedule:\n\n' + unmappedLog.join('\n\n') + '\n\nPlease review the Term tabs.',
+      'Some sections have physical unmapped hours due to extreme bottlenecks:\n\n' + unmappedLog.join('\n\n') + '\n\nPlease review the Term tabs.',
       ui.ButtonSet.OK
     );
   } else {
@@ -681,12 +715,20 @@ function checkRowConflicts(sheet, rowNum) {
     // Check overlaps
     const sameTeacher = r[2] === teacher;
     const sameSection = r[0] === section && section !== '';
+    const sameSubject = sameSection && r[1] === subject;
 
     if (sameTeacher || sameSection) {
       activeDays.forEach(d => {
         if (r[d] === true) {
           if (tIn < rEnd && tOut > rStart) {
             overlaps.push(sameTeacher ? '🔴 Teacher Overlap' : '🔴 Section Overlap');
+          }
+          // Back-to-back constraint for same subject (G11-12) or any (G7-10)
+          if (sameSubject) {
+            const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
+            const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
+            if (grade <= 10) overlaps.push('🔴 JHS: Met twice in a day');
+            else if (tIn === rEnd || tOut === rStart) overlaps.push('🔴 SHS: Back-to-back same subject');
           }
         }
       });
