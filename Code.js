@@ -107,6 +107,11 @@ function onEdit(e) {
   if (sheetName === CFG.REPORT && col === 9 && row > 2 && e.value === 'Implement') {
     applySuggestedFix(e);
   }
+
+  // 3.5 Term Tab Executable Auto-Fixer
+  if (CFG.TERMS.includes(sheetName) && col === 11 && row > 2 && e.value === 'Fix Conflict') {
+    applyTermFix(e);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -211,6 +216,67 @@ function runAutoScheduler(isReshuffle = false) {
          grade: grade,
          slotsAcquired: []
       });
+    });
+
+    // DISTRIBUTE UNASSIGNED SUBJECTS (Cross-Specialization Load Balancing)
+    let teacherWeeklyHours = {};
+    teachers.forEach(t => { if (t[1]) teacherWeeklyHours[t[1]] = 0; });
+
+    // First pass: Calculate pre-assigned hours
+    sectionKeys.forEach(sec => {
+        sectionDemands[sec].forEach(d => {
+            if (d.teacher !== '⚠️ Unassigned' && d.teacher !== 'Unavailable Teacher') {
+                if (teacherWeeklyHours[d.teacher] !== undefined) {
+                    teacherWeeklyHours[d.teacher] += d.originalHours;
+                }
+            }
+        });
+    });
+
+    // Second pass: Distribute unassigned
+    sectionKeys.forEach(sec => {
+        sectionDemands[sec].forEach(d => {
+            if (d.teacher === '⚠️ Unassigned') {
+                let bestT = null;
+                let lowestScore = Infinity;
+
+                let candidateTeachers = teachers.map(t => t[1]).filter(t => t !== 'Unavailable Teacher' && t !== '⚠️ Unassigned');
+                candidateTeachers.sort(() => Math.random() - 0.5);
+
+                candidateTeachers.forEach(tName => {
+                    let hrs = teacherWeeklyHours[tName] || 0;
+
+                    let isSpecMatch = false;
+                    let tObj = teachers.find(t => t[1] === tName);
+                    if (tObj && tObj[2]) {
+                        let spec = tObj[2].toString().toLowerCase();
+                        let subjLower = d.subject.toLowerCase();
+                        if (subjLower.includes(spec) || spec.includes(subjLower)) isSpecMatch = true;
+                    }
+
+                    // Score = current hours + penalty for non-specialist
+                    let score = hrs;
+                    if (!isSpecMatch) score += 5;
+
+                    if (score < lowestScore) {
+                        lowestScore = score;
+                        bestT = tName;
+                    }
+                });
+
+                if (bestT) {
+                    d.teacher = bestT;
+                    d.isSub = true; // flag as distributed substitute
+                    teacherWeeklyHours[bestT] += d.originalHours;
+
+                    if (!tBooked[bestT]) {
+                        tBooked[bestT] = { 1:[], 2:[], 3:[], 4:[], 5:[], sectionsMet: { 1:new Set(), 2:new Set(), 3:new Set(), 4:new Set(), 5:new Set() } };
+                        tBookedMins[bestT] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
+                        tBookedSubjects[bestT] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
+                    }
+                }
+            }
+        });
     });
 
     // TIMELINE-FIRST SCHEDULING (Dense Packing)
@@ -330,8 +396,8 @@ function runAutoScheduler(isReshuffle = false) {
 
                    // Soft Constraints (Heuristics) if teacher is free
                    if (!tBlocked) {
-                       // Prefer < 5 hours (4.5h config)
-                       if (tBookedMins[t][day] + blockDur > CFG.DAILY_PREFERRED_HOURS * 60) score -= 50;
+                       // Prefer <= 4.5 hours (4.5h config)
+                       if (tBookedMins[t][day] + blockDur > CFG.DAILY_PREFERRED_HOURS * 60) score -= 150;
 
                        // Teacher Prep Time: Penalize back-to-back
                        const hasBackToBack = tBooked[t][day].some(b => b.e === time || b.s === endTime);
@@ -429,6 +495,7 @@ function runAutoScheduler(isReshuffle = false) {
           Object.values(grouped).forEach(g => {
             let refinedSugg = suggStr;
             let warn = '';
+
             if (g.finalTeacher === 'Unavailable Teacher') {
                 warn = '🔴 Teacher Conflict';
                 // Find strictly free teachers
@@ -449,6 +516,26 @@ function runAutoScheduler(isReshuffle = false) {
                    if (!isBlocked) trulyFree.push(tName);
                 });
                 if (trulyFree.length > 0) refinedSugg = '★ ' + trulyFree.slice(0, 3).join(', ');
+            } else {
+                // Check if they exceeded 4.5h on any of these days
+                const dayMap = {m:1, t:2, w:3, th:4, f:5};
+                let softLimitHit = false;
+                ['m','t','w','th','f'].forEach(dayKey => {
+                    if (g[dayKey]) {
+                        let dIdx = dayMap[dayKey];
+                        if (tBookedMins[g.finalTeacher] && tBookedMins[g.finalTeacher][dIdx] > CFG.DAILY_PREFERRED_HOURS * 60) {
+                            softLimitHit = true;
+                        }
+                    }
+                });
+
+                if (softLimitHit) {
+                    warn = warn ? warn + ', 🟠 >4.5h Soft Limit' : '🟠 >4.5h Soft Limit';
+                }
+
+                if (d.isSub) {
+                    warn = warn ? warn + ', 🟢 Distributed Sub' : '🟢 Distributed Sub';
+                }
             }
 
             outputRows.push([section, d.subject, g.finalTeacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out, '—', warn, refinedSugg]);
@@ -678,6 +765,32 @@ function _findFreeSlot(allEntries, day, teacher, gradeLevel, durationMins) {
   return null;
 }
 
+function applyTermFix(e) {
+  const sheet = e.range.getSheet();
+  const row = e.range.getRow();
+
+  const suggestions = sheet.getRange(row, 13).getValue();
+  let newTeacher = '';
+
+  if (suggestions && suggestions.startsWith('★ ')) {
+      newTeacher = suggestions.replace('★ ', '').split(',')[0].trim();
+  } else if (suggestions && suggestions !== 'Any Teacher') {
+      newTeacher = suggestions.split(',')[0].trim();
+  }
+
+  if (newTeacher) {
+      sheet.getRange(row, 3).setValue(newTeacher);
+      e.range.setValue('✔ Fixed').setBackground(C.okBg).setFontColor(C.ok).clearDataValidations();
+      e.source.toast(`Reassigned class to ${newTeacher}.`, '✅ Auto-Fixed', 4);
+
+      if (typeof checkRowConflicts === 'function') checkRowConflicts(sheet, row);
+      if (typeof updateSubjectLoadingHours === 'function') updateSubjectLoadingHours();
+  } else {
+      e.range.setValue('—');
+      e.source.toast(`No valid alternative teacher found for auto-fix. Please fix manually.`, '⚠️ Alert', 5);
+  }
+}
+
 function _makeConflict(a, b, type, severity, slot) {
   const sugg = slot ? `Move to ${formatMinsToTime(slot.start)} – ${formatMinsToTime(slot.end)}` : 'Manual Fix Req.';
   const payload = slot ? `${a.term}|${b ? b.rowNum : a.rowNum}|${formatMinsToTime(slot.start)}|${formatMinsToTime(slot.end)}` : '';
@@ -775,7 +888,7 @@ function checkRowConflicts(sheet, rowNum) {
 
   activeDays.forEach(d => {
     if (dailyHrs[d] > CFG.DAILY_HARD_HOURS) warnings.push('🔴 Over 6h limit');
-    else if (dailyHrs[d] > CFG.DAILY_PREFERRED_HOURS) warnings.push('🟠 Over 5.5h limit');
+    else if (dailyHrs[d] > CFG.DAILY_PREFERRED_HOURS) warnings.push('🟠 Over 4.5h limit');
   });
 
   const warnCell = sheet.getRange(rowNum, 12);
