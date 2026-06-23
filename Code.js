@@ -21,16 +21,15 @@ const CFG = {
   SECTION_DASH:   'Section Dashboard', // NEW
   REPORT:         'Schedule Alignment',
   
-  LUNCH_START:       705,  // 11:45 AM (mins since midnight)
+  LUNCH_START:       720,  // 12:00 PM (mins since midnight)
   LUNCH_END:         780,  // 1:00 PM
   WEEKLY_WARN_HOURS: 28,   
   WEEKLY_HARD_HOURS: 30,   
-  DAILY_PREFERRED_HOURS: 5.5,
   DAILY_WARN_HOURS:  5.5, 
   DAILY_HARD_HOURS:  6,   
   SLOT_STEP:         30,   
   SCHOOL_START:      450,  // 7:30 AM
-  SCHOOL_END:        990,  // 4:30 PM
+  SCHOOL_END:        960,  // 4:00 PM
 };
 
 const C = {
@@ -57,7 +56,6 @@ function onOpen() {
     .addItem('4️⃣ Build: Phase 4 Teacher Dash', 'buildPhase4Dashboard')
     .addItem('5️⃣ Build: Phase 5 Conflict Report', 'buildPhase5ConflictReport')
     .addItem('6️⃣ Build: Phase 6 Section Dash', 'buildPhase6SectionDashboard') // NEW
-    .addItem('7️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer') // NEW VISUALIZER
     .addSeparator()
     .addItem('🚀 RUN AUTO-SCHEDULER', 'runAutoScheduler')
     .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
@@ -70,10 +68,6 @@ function onEdit(e) {
   const sheetName = e.range.getSheet().getName();
   const row = e.range.getRow();
   const col = e.range.getColumn();
-  // 4.5 Interactive Learning: Real-time conflict feedback on manual edits
-  if (CFG.TERMS.includes(sheetName) && row > 2 && (col === 3 || col >= 4 && col <= 10)) {
-    checkRowConflicts(e.range.getSheet(), row);
-  }
   
   // 1. Foundation Sweeps & Syncs
   if (sheetName === CFG.SECTION_ENROLL || sheetName === CFG.SUBJECT_LOAD || sheetName === CFG.TEACHER_ENROLL) {
@@ -485,91 +479,6 @@ function _makeConflict(a, b, type, severity, slot) {
   ]};
 }
 
-
-// ══════════════════════════════════════════════════════════════
-//  SECTION 4.5: INTERACTIVE LEARNING & REAL-TIME CONFLICTS
-// ══════════════════════════════════════════════════════════════
-function checkRowConflicts(sheet, rowNum) {
-  const termName = sheet.getName();
-  const data = sheet.getRange(3, 1, Math.max(1, sheet.getLastRow() - 2), 10).getValues();
-
-  const targetRow = data[rowNum - 3];
-  if (!targetRow) return;
-
-  const section = targetRow[0];
-  const subject = targetRow[1];
-  const teacher = targetRow[2];
-  const tIn = parseTime(targetRow[8]);
-  const tOut = parseTime(targetRow[9]);
-
-  // AI Learning Module: Memorize manual overrides
-  if (section && subject && teacher) {
-    const props = PropertiesService.getDocumentProperties();
-    props.setProperty('LEARNED_' + subject + '|' + section, teacher);
-  }
-
-  if (!teacher || tIn >= tOut) {
-    sheet.getRange(rowNum, 12).setValue('');
-    return;
-  }
-
-  const activeDays = [3, 4, 5, 6, 7].filter(d => targetRow[d] === true);
-  if (activeDays.length === 0) return;
-
-  let overlaps = [];
-  let dailyHrs = {3:0, 4:0, 5:0, 6:0, 7:0};
-
-  data.forEach((r, idx) => {
-    if (idx === rowNum - 3) return; // skip self
-    const rStart = parseTime(r[8]);
-    const rEnd = parseTime(r[9]);
-    if (rStart >= rEnd) return;
-
-    // Check overlaps
-    const sameTeacher = r[2] === teacher;
-    const sameSection = r[0] === section && section !== '';
-
-    if (sameTeacher || sameSection) {
-      activeDays.forEach(d => {
-        if (r[d] === true) {
-          if (tIn < rEnd && tOut > rStart) {
-            overlaps.push(sameTeacher ? '🔴 Teacher Overlap' : '🔴 Section Overlap');
-          }
-        }
-      });
-    }
-
-    // Accumulate teacher hours
-    if (sameTeacher) {
-      activeDays.forEach(d => {
-        if (r[d] === true) dailyHrs[d] += (rEnd - rStart) / 60;
-      });
-    }
-  });
-
-  // Add current row duration to daily hrs
-  const dur = (tOut - tIn) / 60;
-  activeDays.forEach(d => dailyHrs[d] += dur);
-
-  let warnings = [];
-  if (overlaps.length > 0) warnings.push(overlaps[0]);
-
-  activeDays.forEach(d => {
-    if (dailyHrs[d] > CFG.DAILY_HARD_HOURS) warnings.push('🔴 Over 6h limit');
-    else if (dailyHrs[d] > CFG.DAILY_PREFERRED_HOURS) warnings.push('🟠 Over 5.5h limit');
-  });
-
-  const warnCell = sheet.getRange(rowNum, 12);
-  if (warnings.length > 0) {
-    warnings = [...new Set(warnings)]; // Dedup
-    const hasError = warnings.some(w => w.includes('🔴'));
-    warnCell.setValue(warnings.join(', ')).setFontColor(hasError ? C.error : C.warn).setFontStyle('normal').setFontWeight('bold');
-  } else {
-    warnCell.setValue('✅ Valid').setFontColor(C.ok).setFontStyle('italic').setFontWeight('normal');
-  }
-}
-
-
 // ══════════════════════════════════════════════════════════════
 //  SECTION 5: DASHBOARD ENGINES (Teacher & Section)
 // ══════════════════════════════════════════════════════════════
@@ -889,8 +798,8 @@ function buildPhase3TermTabs() {
     sheet.getRange('A1:J1').merge().setValue(`📅 ${term.toUpperCase()} MASTER SCHEDULE`).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
     sheet.setRowHeight(1, 40);
 
-    const headers = ['GRADE Level', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out', 'Action', 'Warnings', 'Suggested Teachers'];
-    sheet.getRange('A2:M2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+    const headers = ['GRADE Level', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out'];
+    sheet.getRange('A2:J2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
     sheet.setRowHeight(2, 30);
 
     sheet.setColumnWidth(1, 150); sheet.setColumnWidth(2, 250); sheet.setColumnWidth(3, 200);
@@ -1031,112 +940,4 @@ function formatMinsToTime(mins) {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
-}
-
-
-// ══════════════════════════════════════════════════════════════
-//  SECTION 10: MASTER SECTION VISUALIZER
-// ══════════════════════════════════════════════════════════════
-
-function buildAllSectionsVisualizer() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const visName = '📚 All Sections Schedule';
-  let vis = ss.getSheetByName(visName) || ss.insertSheet(visName, 5);
-  vis.clear();
-
-  vis.getRange('A1:G1').merge().setValue('📚 MASTER SECTIONS TIMETABLE VISUALIZER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  vis.setRowHeight(1, 46);
-  vis.setColumnWidth(1, 100); vis.setColumnWidth(2, 90); vis.setColumnWidths(3, 5, 140);
-
-  let allRows = [];
-  CFG.TERMS.forEach(term => {
-     const ts = ss.getSheetByName(term);
-     if (!ts) return;
-     const lr = ts.getLastRow();
-     if (lr >= 3) {
-        const rows = ts.getRange(3, 1, lr - 2, 11).getValues();
-        allRows = allRows.concat(rows);
-     }
-  });
-
-  if (allRows.length === 0) {
-     return ss.toast('No schedules found in Term tabs to visualize.', '⚠️ Empty', 4);
-  }
-
-  const sections = [...new Set(allRows.map(r => r[0] ? r[0].toString().trim() : '').filter(String))];
-
-  sections.sort((a, b) => {
-     const matchA = a.match(/\d+/); const matchB = b.match(/\d+/);
-     const numA = matchA ? parseInt(matchA[0], 10) : 0;
-     const numB = matchB ? parseInt(matchB[0], 10) : 0;
-     if (numA !== numB) return numA - numB;
-     return a.localeCompare(b);
-  });
-
-  let currentRow = 3;
-
-  sections.forEach(section => {
-      const secRows = allRows.filter(r => r[0] && r[0].toString().trim() === section);
-      if (secRows.length === 0) return;
-
-      const isSHS = section.match(/\b(11|12)\b/) != null;
-
-      vis.getRange(currentRow, 1, 1, 7).merge().setValue('Cohort / Section: ' + section).setFontWeight('bold').setFontSize(12).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('left').setVerticalAlignment('middle');
-      currentRow++;
-
-      const headers = ['TIME', 'MINS', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY'];
-      vis.getRange(currentRow, 1, 1, 7).setValues([headers]).setFontWeight('bold').setBackground(C.navyLight).setHorizontalAlignment('center').setVerticalAlignment('middle').setBorder(true,true,true,true,true,true);
-      currentRow++;
-
-      const grid = [
-        { t: '7:00-7:30', m: 30, mon: 'Flag Raising\nCeremony', tue: 'GROUND PREPARATION/DAILY MORNING ROUTINE', wed: '', thu: '', fri: '', mergeSubj: true },
-        { t: '7:30-8:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-        { t: '8:30-9:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-        { t: '9:30-9:45', m: 15, mon: 'RECESS/GROUP HANDWASHING', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
-        { t: '9:45-10:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-        { t: '10:45-11:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-        { t: '11:45-1:00', m: 75, mon: 'LUNCH BREAK', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
-        { t: '1:00-2:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-        { t: '1:00-2:30', m: 90, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
-        { t: '2:00-3:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-        { t: '2:30-3:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
-        { t: '3:00-4:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
-        { t: '3:30-4:00', m: 30, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
-      ];
-
-      const activeGrid = grid.filter(g => isSHS ? !['1:00-2:00', '2:00-3:00', '3:00-4:00'].includes(g.t) : !g.shs);
-      let outputGrid = [];
-
-      const getSchedule = (timeStr, dayIndex) => {
-         const [inStr, outStr] = timeStr.split('-');
-         const sStart = parseTime(inStr.includes('AM') || inStr.includes('PM') ? inStr : inStr + (parseInt(inStr.split(':')[0]) < 7 || parseInt(inStr.split(':')[0]) === 12 ? ' PM' : ' AM'));
-         const matched = secRows.find(r => r[3 + dayIndex] === true && Math.abs(parseTime(r[8]) - sStart) < 15);
-         return matched ? matched[1] + '\n(' + matched[2] + ')' : '';
-      };
-
-      activeGrid.forEach(g => {
-         let m = g.mon, t = g.tue, w = g.wed, th = g.thu, f = g.fri;
-         if (!g.mergeSubj) {
-            m = getSchedule(g.t, 0) || m;
-            t = getSchedule(g.t, 1) || t;
-            w = getSchedule(g.t, 2) || w;
-            th = getSchedule(g.t, 3) || th;
-            f = getSchedule(g.t, 4) || f;
-         }
-         outputGrid.push([g.t, g.m, m, t, w, th, f]);
-      });
-
-      vis.getRange(currentRow, 1, outputGrid.length, 7).setValues(outputGrid).setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setBorder(true,true,true,true,true,true);
-
-      for (let i = 0; i < activeGrid.length; i++) {
-         const r = currentRow + i;
-         if (activeGrid[i].t === '7:00-7:30') { vis.getRange(r, 4, 1, 4).merge().setBackground('#d9d9d9'); vis.getRange(r, 3).setBackground('#d9d9d9'); }
-         if (activeGrid[i].t === '9:30-9:45') { vis.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
-         if (activeGrid[i].t === '11:45-1:00') { vis.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
-      }
-
-      currentRow += outputGrid.length + 2;
-  });
-
-  ss.toast('Visualizer generated successfully!', '✅ Done', 4);
 }
