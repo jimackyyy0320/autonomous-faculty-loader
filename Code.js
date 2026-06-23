@@ -76,6 +76,12 @@ function onEdit(e) {
   // 4.5 Interactive Learning: Real-time conflict feedback on manual edits
   if (CFG.TERMS.includes(sheetName) && row > 2 && (col === 3 || col >= 4 && col <= 10)) {
     checkRowConflicts(e.range.getSheet(), row);
+    updateSubjectLoadingHours();
+  }
+
+  // 4.6 Subject Loading Live Updates
+  if (sheetName === CFG.SUBJECT_LOAD && row > 2 && col <= 4) {
+    updateSubjectLoadingHours();
   }
 
   // 1. Foundation Sweeps & Syncs
@@ -466,9 +472,27 @@ function runAutoScheduler(isReshuffle = false) {
       'Some sections have physical unmapped hours due to extreme bottlenecks:\n\n' + unmappedLog.join('\n\n') + '\n\nPlease review the Term tabs.',
       ui.ButtonSet.OK
     );
+
+    const rep = ss.getSheetByName(CFG.REPORT);
+    if (rep) {
+        let lr = Math.max(3, rep.getLastRow() + 1);
+        let out = [];
+        unmappedLog.forEach(log => {
+            // log format: [Term 1] Science (Grade 7) — 1h unmapped. No physical slots left in week.
+            const match = log.match(/\[(.*?)\] (.*?) \((.*?)\) — (.*?h) unmapped/);
+            if (match) {
+                out.push([match[1], '🔴 Unmapped Hours', 'ALL', match[3], 'N/A', 'N/A', match[2], `Needs ${match[4]}`, '—']);
+            }
+        });
+        if (out.length > 0) {
+            rep.getRange(lr, 1, out.length, 9).setValues(out).setBackground(C.errorBg).setFontColor(C.error);
+        }
+    }
   } else {
     ss.toast('Schedules are completely mapped out and optimized!', '✅ All Set', 6);
   }
+
+  if (typeof updateSubjectLoadingHours === 'function') updateSubjectLoadingHours();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1047,11 +1071,11 @@ function buildPhase1Tabs() {
 
   let subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD) || ss.insertSheet(CFG.SUBJECT_LOAD, 1);
   subSheet.clear();
-  subSheet.getRange('A1:D1').merge().setValue('📚 SUBJECT LOADING (CURRICULUM DEMAND)').setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  subSheet.getRange('A2:D2').setValues([['Term', 'Section', 'Subject', 'Weekly Class Hours']]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  subSheet.setColumnWidth(1, 120); subSheet.setColumnWidth(2, 200); subSheet.setColumnWidth(3, 250); subSheet.setColumnWidth(4, 150);
-  subSheet.getRange('A3:D1000').setFontColor(C.body).setVerticalAlignment('middle');
-  subSheet.getRange('D3:D1000').setNumberFormat('0.0').setHorizontalAlignment('center');
+  subSheet.getRange('A1:E1').merge().setValue('📚 SUBJECT LOADING (CURRICULUM DEMAND)').setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  subSheet.getRange('A2:E2').setValues([['Term', 'Section', 'Subject', 'Weekly Class Hours', 'Hours Loaded']]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  subSheet.setColumnWidth(1, 120); subSheet.setColumnWidth(2, 200); subSheet.setColumnWidth(3, 250); subSheet.setColumnWidth(4, 150); subSheet.setColumnWidth(5, 150);
+  subSheet.getRange('A3:E1000').setFontColor(C.body).setVerticalAlignment('middle');
+  subSheet.getRange('D3:E1000').setNumberFormat('0.0').setHorizontalAlignment('center');
   subSheet.getRange('A3:A1000').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setHorizontalAlignment('center');
   subSheet.setFrozenRows(2);
 
@@ -1189,6 +1213,70 @@ function buildPhase5ConflictReport() {
 }
 
 
+
+
+function updateSubjectLoadingHours() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
+  if (!subSheet) return;
+
+  const lr = Math.max(3, subSheet.getLastRow());
+  const demands = subSheet.getRange(3, 1, lr - 2, 4).getValues(); // We read up to Col D
+
+  // Aggregate all loaded hours from Term tabs
+  const loadedMap = {};
+
+  CFG.TERMS.forEach(term => {
+     const ts = ss.getSheetByName(term);
+     if (!ts) return;
+     const tlr = ts.getLastRow();
+     if (tlr < 3) return;
+     const rows = ts.getRange(3, 1, tlr - 2, 10).getValues(); // 0:Sec, 1:Subj, 2:Teach, 3-7:Days, 8:In, 9:Out
+
+     rows.forEach(r => {
+        const sec = r[0].toString().trim();
+        const sub = r[1].toString().trim();
+        if (!sec || !sub) return;
+
+        const start = parseTime(r[8]);
+        const end = parseTime(r[9]);
+        if (start >= end) return;
+
+        let daysOn = 0;
+        for (let d = 3; d <= 7; d++) { if (r[d] === true) daysOn++; }
+
+        const key = term + '|' + sec + '|' + sub;
+        if (!loadedMap[key]) loadedMap[key] = 0;
+
+        // Add duration mapped across all active days for this slot
+        loadedMap[key] += ((end - start) / 60) * daysOn;
+     });
+  });
+
+  const output = [];
+  let bgColors = [];
+
+  demands.forEach(d => {
+     const key = d[0] + '|' + d[1] + '|' + d[2];
+     const req = parseFloat(d[3]) || 0;
+     const loaded = loadedMap[key] || 0;
+
+     if (!d[0] || !d[1] || !d[2]) {
+         output.push(['']);
+         bgColors.push([C.white]);
+     } else {
+         output.push([loaded]);
+         // Status coloring
+         if (loaded < req) bgColors.push([C.warnBg]);
+         else if (loaded > req) bgColors.push([C.errorBg]);
+         else bgColors.push([C.okBg]);
+     }
+  });
+
+  if (output.length > 0) {
+      subSheet.getRange(3, 5, output.length, 1).setValues(output).setBackgrounds(bgColors);
+  }
+}
 
 // ══════════════════════════════════════════════════════════════
 //  SECTION 8: TIME & MATH UTILITIES
