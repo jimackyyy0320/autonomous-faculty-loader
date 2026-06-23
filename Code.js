@@ -190,6 +190,7 @@ function runAutoScheduler(isReshuffle = false) {
       const gradeMatch = sec.match(/\b(11|12|7|8|9|10)\b/);
       const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
 
+      const isHomeroom = subj.toLowerCase().includes('homeroom');
       let durationMins = 60; // Minimum 1 hour unless Homeroom
       if (isPhilGov) durationMins = 90;
       else if (hrs % 1 === 0.5 && !isHomeroom) durationMins = 90; // Fractional weekly hours end in .5 -> 90 mins
@@ -198,8 +199,6 @@ function runAutoScheduler(isReshuffle = false) {
 
       const isAral = subj.match(/\bARAL\b/i) && !subj.toLowerCase().includes('panlipunan');
       if (isAral) durationMins = 60; // ARAL exactly 1 hour
-
-      const isHomeroom = subj.toLowerCase().includes('homeroom');
 
       sectionDemands[sec].push({
          subject: subj,
@@ -1113,13 +1112,16 @@ function updateSectionDropdowns() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const secSheet = ss.getSheetByName(CFG.SECTION_ENROLL);
   const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
-  const secDashSheet = ss.getSheetByName(CFG.SECTION_DASH); // NEW
 
   if (!secSheet) return;
   const rule = SpreadsheetApp.newDataValidation().requireValueInRange(secSheet.getRange('B3:B1000'), true).build();
 
   if (subSheet) subSheet.getRange('B3:B1000').setDataValidation(rule);
-  if (secDashSheet) secDashSheet.getRange('B2').setDataValidation(rule); // Sync to Dashboard
+
+  CFG.TERMS.forEach(term => {
+    const termSheet = ss.getSheetByName(term);
+    if (termSheet) termSheet.getRange('A3:A1000').setDataValidation(rule);
+  });
 }
 
 function updateTeacherNameDropdowns() {
@@ -1140,6 +1142,11 @@ function updateTeacherNameDropdowns() {
     dashSheet.getRange('B2').setDataValidation(rule);
     dashSheet.getRange('L2').setDataValidation(rule);
   }
+
+  CFG.TERMS.forEach(term => {
+    const termSheet = ss.getSheetByName(term);
+    if (termSheet) termSheet.getRange('C3:C1000').setDataValidation(rule);
+  });
 }
 
 
@@ -1198,10 +1205,10 @@ function buildPhase3TermTabs() {
   CFG.TERMS.forEach((term, index) => {
     let sheet = ss.getSheetByName(term) || ss.insertSheet(term, 4 + index);
     sheet.clear();
-    sheet.getRange('A1:J1').merge().setValue(`📅 ${term.toUpperCase()} MASTER SCHEDULE`).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+    sheet.getRange('A1:M1').merge().setValue(`📅 ${term.toUpperCase()} MASTER SCHEDULE`).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
     sheet.setRowHeight(1, 40);
 
-    const headers = ['GRADE Level', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out', 'Action', 'Warnings', 'Suggested Teachers'];
+    const headers = ['Section', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out', 'Action', 'Warnings', 'Suggested Teachers'];
     sheet.getRange('A2:M2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
     sheet.setRowHeight(2, 30);
 
@@ -1219,6 +1226,8 @@ function buildPhase3TermTabs() {
     sheet.setFrozenRows(2);
   });
 
+  updateSectionDropdowns();
+  updateTeacherNameDropdowns();
   ss.toast('Term schedules successfully built.', '✅ Phase 3 Complete', 5);
 }
 
