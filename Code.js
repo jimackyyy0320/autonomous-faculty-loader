@@ -21,15 +21,16 @@ const CFG = {
   SECTION_DASH:   'Section Dashboard', // NEW
   REPORT:         'Schedule Alignment',
   
-  LUNCH_START:       720,  // 12:00 PM (mins since midnight)
+  LUNCH_START:       705,  // 11:45 AM (mins since midnight)
   LUNCH_END:         780,  // 1:00 PM
   WEEKLY_WARN_HOURS: 28,   
   WEEKLY_HARD_HOURS: 30,   
+  DAILY_PREFERRED_HOURS: 5.5,
   DAILY_WARN_HOURS:  5.5, 
   DAILY_HARD_HOURS:  6,   
   SLOT_STEP:         30,   
   SCHOOL_START:      450,  // 7:30 AM
-  SCHOOL_END:        960,  // 4:00 PM
+  SCHOOL_END:        990,  // 4:30 PM
 };
 
 const C = {
@@ -56,9 +57,13 @@ function onOpen() {
     .addItem('4️⃣ Build: Phase 4 Teacher Dash', 'buildPhase4Dashboard')
     .addItem('5️⃣ Build: Phase 5 Conflict Report', 'buildPhase5ConflictReport')
     .addItem('6️⃣ Build: Phase 6 Section Dash', 'buildPhase6SectionDashboard') // NEW
+    .addItem('7️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer') // NEW VISUALIZER
     .addSeparator()
     .addItem('🚀 RUN AUTO-SCHEDULER', 'runAutoScheduler')
+    .addItem('🔄 RECALCULATE SCHEDULE', 'runAutoScheduler')
     .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
+    .addSeparator()
+    .addItem('🖨️ Generate Schedule PDF', 'generateScheduleUI')
     .addToUi();
 }
 
@@ -69,6 +74,11 @@ function onEdit(e) {
   const row = e.range.getRow();
   const col = e.range.getColumn();
   
+  // 4.5 Interactive Learning: Real-time conflict feedback on manual edits
+  if (CFG.TERMS.includes(sheetName) && row > 2 && (col === 3 || col >= 4 && col <= 10)) {
+    checkRowConflicts(e.range.getSheet(), row);
+  }
+
   // 1. Foundation Sweeps & Syncs
   if (sheetName === CFG.SECTION_ENROLL || sheetName === CFG.SUBJECT_LOAD || sheetName === CFG.TEACHER_ENROLL) {
     cleanOrphanedData();
@@ -78,12 +88,19 @@ function onEdit(e) {
   }
 
   // 2. Dashboards Live Filter (Both Teacher and Section)
-  if ((sheetName === CFG.DASHBOARD || sheetName === CFG.SECTION_DASH) && col === 2 && row >= 2 && row <= 4) {
+  if (sheetName === CFG.SECTION_DASH && col === 2 && row >= 2 && row <= 4) {
     const sheet = e.range.getSheet();
     if (row === 3) { e.value === 'ALL WEEK' ? sheet.showColumns(5, 5) : sheet.hideColumns(5, 5); }
+    updateSectionDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
+  }
 
-    if (sheetName === CFG.DASHBOARD) updateDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
-    if (sheetName === CFG.SECTION_DASH) updateSectionDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet());
+  if (sheetName === CFG.DASHBOARD && (col === 2 || col === 12) && row >= 2 && row <= 4) {
+    const sheet = e.range.getSheet();
+    if (row === 3) {
+      if (col === 2) { e.value === 'ALL WEEK' ? sheet.showColumns(5, 5) : sheet.hideColumns(5, 5); }
+      if (col === 12) { e.value === 'ALL WEEK' ? sheet.showColumns(15, 5) : sheet.hideColumns(15, 5); }
+    }
+    updateDashboardUI(sheet, SpreadsheetApp.getActiveSpreadsheet(), col === 2 ? 1 : 2);
   }
 
   // 3. Conflict 1-Click "Implement" Auto-Fixer
@@ -100,9 +117,10 @@ function runAutoScheduler() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
   const assignSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
+  const enrollSheet = ss.getSheetByName(CFG.TEACHER_ENROLL);
   
-  if (!subSheet || !assignSheet) {
-    return ss.toast('Please ensure your Subject Loading and Teacher Assignment tabs are set up first.', '👋 Just a quick note', 5);
+  if (!subSheet || !assignSheet || !enrollSheet) {
+    return ss.toast('Please ensure your Subject Loading, Teacher Assignment, and Teacher Enrollment tabs are set up first.', '👋 Just a quick note', 5);
   }
 
   ss.toast('Running advanced multi-pass algorithm with bottleneck detection...', '🧠 Computing', 4);
@@ -114,6 +132,7 @@ function runAutoScheduler() {
 
   const demands = getSafeData(subSheet, 4).filter(r => r[0] && r[1] && r[2]);
   const assignments = getSafeData(assignSheet, 3).filter(r => r[0]);
+  const teachers = getSafeData(enrollSheet, 3).filter(r => r[1]);
 
   const assignMap = {};
   assignments.forEach(a => assignMap[`${a[1].toString().trim()}|${a[2].toString().trim()}`] = a[0]);
@@ -123,8 +142,10 @@ function runAutoScheduler() {
     if (ts) {
       const lr = ts.getLastRow();
       if (lr >= 3) {
-        ts.getRange(3, 1, lr - 2, 10).clearContent();
+        ts.getRange(3, 1, lr - 2, 13).clearContent();
         ts.getRange(3, 4, lr - 2, 5).insertCheckboxes();
+        const actionRule = SpreadsheetApp.newDataValidation().requireValueInList(['—', 'Fix Conflict'], true).build();
+        ts.getRange(3, 11, lr - 2, 1).setDataValidation(actionRule);
       }
     }
   });
@@ -139,6 +160,15 @@ function runAutoScheduler() {
     { in: '3:00 PM',  out: '4:00 PM',  s: 900, e: 960 }
   ];
 
+  const SHS_SLOTS = [
+    { in: '7:30 AM',  out: '8:30 AM',  s: 450, e: 510 },
+    { in: '8:30 AM',  out: '9:30 AM',  s: 510, e: 570 },
+    { in: '9:45 AM',  out: '10:45 AM', s: 585, e: 645 },
+    { in: '10:45 AM', out: '11:45 AM', s: 645, e: 705 },
+    { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
+    { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
+  ];
+
   let unmappedLog = [];
 
   CFG.TERMS.forEach(term => {
@@ -146,100 +176,180 @@ function runAutoScheduler() {
     if (!termDemands.length) return;
 
     const tBooked = {};
+    const tBookedMins = {};
     const cBooked = {};
     const outputRows = [];
 
-    // Prioritize Homerooms, then heaviest hours
+    // Prioritize Homerooms, group by Section, then heavily load first
     termDemands.sort((a, b) => {
       const isAHomeroom = a[2].toString().toLowerCase().includes('homeroom') ? 1 : 0;
       const isBHomeroom = b[2].toString().toLowerCase().includes('homeroom') ? 1 : 0;
       if (isAHomeroom !== isBHomeroom) return isBHomeroom - isAHomeroom;
+
+      const secA = a[1].toString().trim();
+      const secB = b[1].toString().trim();
+      if (secA !== secB) return secA.localeCompare(secB);
+
       return (parseFloat(b[3]) || 0) - (parseFloat(a[3]) || 0);
     });
+
+    const props = PropertiesService.getDocumentProperties();
 
     termDemands.forEach(d => {
       const section = d[1].toString().trim();
       const subject = d[2].toString().trim();
-      let hoursLeft = Math.round(parseFloat(d[3]) || 0);
+      let hoursLeft = parseFloat(d[3]) || 0;
       const originalHours = hoursLeft;
 
-      const teacher = assignMap[`${subject}|${section}`] || '⚠️ Unassigned';
+      const learnedTeacher = props.getProperty('LEARNED_' + subject + '|' + section);
+      const teacher = learnedTeacher || assignMap[`${subject}|${section}`] || '⚠️ Unassigned';
       if (teacher === '⚠️ Unassigned') {
         unmappedLog.push(`[${term}] ${subject} (${section}): No teacher assigned.`);
         return;
       }
 
       if (!tBooked[teacher]) tBooked[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
+      if (!tBookedMins[teacher]) tBookedMins[teacher] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
       if (!cBooked[section]) cBooked[section] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
 
-      let candidateSlots = STANDARD_SLOTS;
-      let prefDays = [1,2,3,4,5];
+      const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
+      const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
+
+      let candidateSlots = grade >= 11 ? SHS_SLOTS : STANDARD_SLOTS;
+
+      const isPhilGov = subject.toLowerCase().includes('phil gov') || subject.toLowerCase().includes('philippine politics');
+      if (isPhilGov) {
+        candidateSlots = [
+          { in: '7:30 AM',  out: '9:00 AM',  s: 450, e: 540 },
+          { in: '9:00 AM',  out: '10:30 AM', s: 540, e: 630 },
+          { in: '1:00 PM',  out: '2:30 PM',  s: 780, e: 870 },
+          { in: '2:30 PM',  out: '4:00 PM',  s: 870, e: 960 }
+        ];
+      }
+
+      let prefDays = [1,2,3,4,5].sort(() => Math.random() - 0.5);
       const isHomeroom = subject.toLowerCase().includes('homeroom');
+      const isAralEnd = subject.match(/\bARAL\b/i) && !subject.toLowerCase().includes('panlipunan');
+
+      if (isAralEnd) candidateSlots = [{ in: '3:00 PM',  out: '4:00 PM',  s: 900, e: 960 }];
 
       if (isHomeroom) {
         prefDays = [1];
-        const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
-        const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
-
-        if (grade >= 11) {
-          candidateSlots = [
-            { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 },
-            { in: '3:00 PM', out: '4:00 PM', s: 900, e: 960 }
-          ];
-        } else {
-          candidateSlots = [ { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 } ];
-        }
+        if (grade >= 11) candidateSlots = [{ in: '3:30 PM', out: '4:30 PM', s: 930, e: 990 }, { in: '3:00 PM', out: '4:00 PM', s: 900, e: 960 }].sort(() => Math.random() - 0.5);
+        else candidateSlots = [ { in: '7:30 AM', out: '8:30 AM', s: 450, e: 510 } ];
       } else {
-        if (hoursLeft === 4) prefDays = [1,2,4,5];
-        if (hoursLeft === 3) prefDays = [1,3,5];
-        if (hoursLeft === 2) prefDays = [2,4];
-        if (hoursLeft === 1) prefDays = [3];
+        if (isPhilGov && hoursLeft === 3) prefDays = [2, 4];
+        else if (hoursLeft === 4) prefDays = [1,2,4,5];
+        else if (hoursLeft === 3) prefDays = [1,3,5];
+        else if (hoursLeft === 2) prefDays = [2,4];
+        else if (hoursLeft === 1) prefDays = [3];
+        prefDays = prefDays.sort(() => Math.random() - 0.5);
       }
 
       let slotsAcquired = [];
+      let rowWarnings = [];
+      let daysUsedForSubject = new Set();
 
-      const isFree = (day, slot) => {
+      const isFree = (day, slot, checkPreferred = true) => {
         const tConflict = tBooked[teacher][day].some(b => slot.s < b.e && slot.e > b.s);
         const cConflict = cBooked[section][day].some(b => slot.s < b.e && slot.e > b.s);
-        return !tConflict && !cConflict;
+        if (tConflict || cConflict) return false;
+
+        if (checkPreferred && !isHomeroom) {
+            const isMorning = slot.s < 720;
+            let halfDayMins = 0;
+            tBooked[teacher][day].forEach(b => {
+                if (isMorning && b.s < 720) halfDayMins += (b.e - b.s);
+                else if (!isMorning && b.s >= 720) halfDayMins += (b.e - b.s);
+            });
+            if (halfDayMins + (slot.e - slot.s) > 3 * 60) return false;
+        }
+
+        const duration = slot.e - slot.s;
+        if (!isHomeroom) {
+          if (checkPreferred) {
+            if (tBookedMins[teacher][day] + duration > CFG.DAILY_PREFERRED_HOURS * 60) return false;
+          } else {
+            if (tBookedMins[teacher][day] + duration > CFG.DAILY_HARD_HOURS * 60) return false;
+          }
+        }
+        return true;
       };
 
       const bookSlot = (day, slot) => {
-        tBooked[teacher][day].push({s: slot.s, e: slot.e});
-        cBooked[section][day].push({s: slot.s, e: slot.e});
-        slotsAcquired.push({ day, in: slot.in, out: slot.out, s: slot.s });
-        hoursLeft--;
+        let dur = (slot.e - slot.s) / 60;
+        let actualE = slot.e;
+        let actualOut = slot.out;
+        if (hoursLeft < dur) {
+            actualE = slot.s + Math.round(hoursLeft * 60);
+            actualOut = formatMinsToTime(actualE);
+            dur = hoursLeft;
+        }
+
+        tBooked[teacher][day].push({s: slot.s, e: actualE});
+        tBookedMins[teacher][day] += (actualE - slot.s);
+        cBooked[section][day].push({s: slot.s, e: actualE});
+        slotsAcquired.push({ day, in: slot.in, out: actualOut, s: slot.s, e: actualE });
+        hoursLeft -= dur;
+        daysUsedForSubject.add(day);
       };
 
       for (let day of prefDays) {
         if (hoursLeft <= 0) break;
         for (let slot of candidateSlots) {
-          if (isFree(day, slot)) { bookSlot(day, slot); break; }
+          if (daysUsedForSubject.has(day) && !isHomeroom) continue;
+          if (isFree(day, slot, true)) { bookSlot(day, slot); break; }
         }
       }
 
       if (hoursLeft > 0 && !isHomeroom) {
-        for (let day of [1,2,3,4,5]) {
-          if (hoursLeft <= 0) break;
-          if (slotsAcquired.some(s => s.day === day)) continue;
-          for (let slot of candidateSlots) {
-            if (isFree(day, slot)) { bookSlot(day, slot); break; }
-          }
-        }
-      }
-
-      if (hoursLeft > 0 && !isHomeroom) {
-        for (let day of [1,2,3,4,5]) {
-          if (hoursLeft <= 0) break;
-          for (let slot of candidateSlots) {
+        for (let slot of candidateSlots) {
+          for (let day of [1,2,3,4,5]) {
             if (hoursLeft <= 0) break;
-            if (isFree(day, slot)) { bookSlot(day, slot); }
+            if (daysUsedForSubject.has(day)) continue;
+            if (isFree(day, slot, true)) { bookSlot(day, slot); }
           }
+          if (hoursLeft <= 0) break;
+        }
+      }
+
+      // Fallback
+      if (hoursLeft > 0 && !isHomeroom) {
+        for (let day of prefDays) {
+          if (hoursLeft <= 0) break;
+          for (let slot of candidateSlots) {
+            if (daysUsedForSubject.has(day)) continue;
+            if (isFree(day, slot, false)) {
+              bookSlot(day, slot);
+              const warnStr = `⚠️ Exceeds ${CFG.DAILY_PREFERRED_HOURS}h limit`;
+              unmappedLog.push(`[${term}] Soft Warning: ${teacher} exceeded ${CFG.DAILY_PREFERRED_HOURS}h limit.`);
+              if (!rowWarnings.includes(warnStr)) rowWarnings.push(warnStr);
+              break;
+            }
+          }
+        }
+      }
+
+      if (hoursLeft > 0 && !isHomeroom) {
+        for (let slot of candidateSlots) {
+          for (let day of [1,2,3,4,5]) {
+            if (hoursLeft <= 0) break;
+            if (daysUsedForSubject.has(day)) continue;
+            if (isFree(day, slot, false)) {
+              bookSlot(day, slot);
+              const warnStr = `⚠️ Exceeds ${CFG.DAILY_PREFERRED_HOURS}h limit`;
+              if (!rowWarnings.includes(warnStr)) rowWarnings.push(warnStr);
+              break;
+            }
+          }
+          if (hoursLeft <= 0) break;
         }
       }
 
       if (hoursLeft > 0) {
-        unmappedLog.push(`[${term}] ${subject} (${section}) — Mapped ${originalHours - hoursLeft}/${originalHours} hrs. Overlap detected for ${teacher}.`);
+        const warnStr = `🔴 Overlap/Unmapped ${hoursLeft}h`;
+        unmappedLog.push(`[${term}] ${subject} (${section}) — Mapped ${originalHours - hoursLeft}/${originalHours} hrs.`);
+        if (!rowWarnings.includes(warnStr)) rowWarnings.push(warnStr);
       }
 
       const grouped = {};
@@ -253,16 +363,37 @@ function runAutoScheduler() {
         if (sa.day === 5) grouped[key].f = true;
       });
 
+      const warningText = rowWarnings.join(', ');
+
+      // Teacher Suggestions Based on Major
+      let suggestions = [];
+      const subjLower = subject.toLowerCase();
+      teachers.forEach(t => {
+        const spec = t[2].toString().toLowerCase();
+        if (spec && (subjLower.includes(spec) || spec.includes(subjLower))) {
+          suggestions.push(t[1]);
+        }
+      });
+      if (suggestions.length === 0) {
+        teachers.forEach(t => {
+          const spec = t[2].toString().toLowerCase();
+          const words = subjLower.split(' ').filter(w => w.length > 3);
+          if (words.some(w => spec.includes(w))) suggestions.push(t[1]);
+        });
+      }
+      const suggStr = suggestions.length > 0 ? suggestions.slice(0, 3).join(', ') : 'Any Teacher';
+
       Object.values(grouped).forEach(g => {
-        outputRows.push([section, subject, teacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out]);
+        outputRows.push([section, subject, teacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out, '—', warningText, suggStr]);
       });
     });
 
     const ts = ss.getSheetByName(term);
     if (ts && outputRows.length > 0) {
-      ts.getRange(3, 1, outputRows.length, 10).setValues(outputRows);
-      ts.getRange(3, 1, outputRows.length, 10).setVerticalAlignment('middle');
+      ts.getRange(3, 1, outputRows.length, 13).setValues(outputRows);
+      ts.getRange(3, 1, outputRows.length, 13).setVerticalAlignment('middle');
       ts.getRange(3, 9, outputRows.length, 2).setHorizontalAlignment('center');
+      ts.getRange(3, 12, outputRows.length, 1).setFontColor(C.warn).setFontStyle('italic');
     }
   });
 
@@ -479,20 +610,108 @@ function _makeConflict(a, b, type, severity, slot) {
   ]};
 }
 
+
+// ══════════════════════════════════════════════════════════════
+//  SECTION 4.5: INTERACTIVE LEARNING & REAL-TIME CONFLICTS
+// ══════════════════════════════════════════════════════════════
+function checkRowConflicts(sheet, rowNum) {
+  const termName = sheet.getName();
+  const data = sheet.getRange(3, 1, Math.max(1, sheet.getLastRow() - 2), 10).getValues();
+
+  const targetRow = data[rowNum - 3];
+  if (!targetRow) return;
+
+  const section = targetRow[0];
+  const subject = targetRow[1];
+  const teacher = targetRow[2];
+  const tIn = parseTime(targetRow[8]);
+  const tOut = parseTime(targetRow[9]);
+
+  // AI Learning Module: Memorize manual overrides
+  if (section && subject && teacher) {
+    const props = PropertiesService.getDocumentProperties();
+    props.setProperty('LEARNED_' + subject + '|' + section, teacher);
+  }
+
+  if (!teacher || tIn >= tOut) {
+    sheet.getRange(rowNum, 12).setValue('');
+    return;
+  }
+
+  const activeDays = [3, 4, 5, 6, 7].filter(d => targetRow[d] === true);
+  if (activeDays.length === 0) return;
+
+  let overlaps = [];
+  let dailyHrs = {3:0, 4:0, 5:0, 6:0, 7:0};
+
+  data.forEach((r, idx) => {
+    if (idx === rowNum - 3) return; // skip self
+    const rStart = parseTime(r[8]);
+    const rEnd = parseTime(r[9]);
+    if (rStart >= rEnd) return;
+
+    // Check overlaps
+    const sameTeacher = r[2] === teacher;
+    const sameSection = r[0] === section && section !== '';
+
+    if (sameTeacher || sameSection) {
+      activeDays.forEach(d => {
+        if (r[d] === true) {
+          if (tIn < rEnd && tOut > rStart) {
+            overlaps.push(sameTeacher ? '🔴 Teacher Overlap' : '🔴 Section Overlap');
+          }
+        }
+      });
+    }
+
+    // Accumulate teacher hours
+    if (sameTeacher) {
+      activeDays.forEach(d => {
+        if (r[d] === true) dailyHrs[d] += (rEnd - rStart) / 60;
+      });
+    }
+  });
+
+  // Add current row duration to daily hrs
+  const dur = (tOut - tIn) / 60;
+  activeDays.forEach(d => dailyHrs[d] += dur);
+
+  let warnings = [];
+  if (overlaps.length > 0) warnings.push(overlaps[0]);
+
+  activeDays.forEach(d => {
+    if (dailyHrs[d] > CFG.DAILY_HARD_HOURS) warnings.push('🔴 Over 6h limit');
+    else if (dailyHrs[d] > CFG.DAILY_PREFERRED_HOURS) warnings.push('🟠 Over 5.5h limit');
+  });
+
+  const warnCell = sheet.getRange(rowNum, 12);
+  if (warnings.length > 0) {
+    warnings = [...new Set(warnings)]; // Dedup
+    const hasError = warnings.some(w => w.includes('🔴'));
+    warnCell.setValue(warnings.join(', ')).setFontColor(hasError ? C.error : C.warn).setFontStyle('normal').setFontWeight('bold');
+  } else {
+    warnCell.setValue('✅ Valid').setFontColor(C.ok).setFontStyle('italic').setFontWeight('normal');
+  }
+}
+
+
 // ══════════════════════════════════════════════════════════════
 //  SECTION 5: DASHBOARD ENGINES (Teacher & Section)
 // ══════════════════════════════════════════════════════════════
 
-function updateDashboardUI(dash, ss) {
-  const teacher = dash.getRange('B2').getValue();
-  const day     = dash.getRange('B3').getValue();
-  const term    = dash.getRange('B4').getValue();
+function updateDashboardUI(dash, ss, pane = 1) {
+  const colOffset = pane === 1 ? 0 : 10; // Pane 1 is col 1, Pane 2 is col 11 (K)
+  const prefix = pane === 1 ? '' : '1';
+
+  const teacher = dash.getRange(2, 2 + colOffset).getValue();
+  const day     = dash.getRange(3, 2 + colOffset).getValue();
+  const term    = dash.getRange(4, 2 + colOffset).getValue();
 
   const maxR = dash.getMaxRows();
-  if (maxR > 5) dash.getRange(6, 1, maxR - 5, 9).clearContent().clearDataValidations().clearFormat();
+  if (maxR > 5) dash.getRange(6, 1 + colOffset, maxR - 5, 9).clearContent().clearDataValidations().clearFormat();
   
-  dash.getRange('C4').setValue('');
-  dash.getRange('E4').setValue('Select options...').setBackground(C.tealLight).setFontColor(C.teal);
+  dash.getRange(4, 3 + colOffset).setValue('');
+  dash.getRange(4, 5 + colOffset).setValue('Select options...').setBackground(C.tealLight).setFontColor(C.teal);
 
   if (!teacher || !term) return;
 
@@ -502,7 +721,7 @@ function updateDashboardUI(dash, ss) {
   const dayMap = { MON: 3, TUE: 4, WED: 5, THU: 6, FRI: 7 };
   const lastRow = src.getLastRow();
   if (lastRow < 3) return;
-  const rows = src.getRange(3, 1, lastRow - 2, 10).getValues();
+  const rows = src.getRange(3, 1, lastRow - 2, 11).getValues(); // We fetch up to K (Warnings/Status could be present, but we only need up to index 9 for time out)
   
   let output = [];
   let totalMins = 0;
@@ -530,7 +749,7 @@ function updateDashboardUI(dash, ss) {
   output.sort((a, b) => parseTime(a[2]) - parseTime(b[2]));
 
   const totalHours = totalMins / 60;
-  dash.getRange('C4').setValue(totalHours);
+  dash.getRange(4, 3 + colOffset).setValue(totalHours);
 
   let statusText = '✅ Normal Load';
   let statusBg = C.okBg; let statusFg = C.ok;
@@ -547,23 +766,23 @@ function updateDashboardUI(dash, ss) {
     statusText = '⚪ No Load'; statusBg = C.navyLight; statusFg = C.muted;
   }
 
-  dash.getRange('C4').setBackground(statusBg).setFontColor(statusFg);
-  dash.getRange('E4').setValue(statusText).setBackground(statusBg).setFontColor(statusFg);
+  dash.getRange(4, 3 + colOffset).setBackground(statusBg).setFontColor(statusFg);
+  dash.getRange(4, 5 + colOffset).setValue(statusText).setBackground(statusBg).setFontColor(statusFg);
 
   if (!output.length) {
-    dash.getRange('A6:I6').merge().setValue('No schedule found for these criteria.').setFontStyle('italic').setFontColor(C.muted).setHorizontalAlignment('center');
+    dash.getRange(6, 1 + colOffset, 1, 9).merge().setValue('No schedule found for these criteria.').setFontStyle('italic').setFontColor(C.muted).setHorizontalAlignment('center');
     return;
   }
 
-  dash.getRange(6, 1, output.length, 9).setValues(output);
+  dash.getRange(6, 1 + colOffset, output.length, 9).setValues(output);
   for (let r = 0; r < output.length; r++) {
-    dash.getRange(6 + r, 1, 1, 9).setBackground(r % 2 === 0 ? C.white : C.rowAlt).setFontColor(C.body);
+    dash.getRange(6 + r, 1 + colOffset, 1, 9).setBackground(r % 2 === 0 ? C.white : C.rowAlt).setFontColor(C.body);
   }
-  dash.getRange(6, 2, output.length, 1).setHorizontalAlignment('center');
-  dash.getRange(6, 3, output.length, 2).setNumberFormat('h:mm AM/PM').setHorizontalAlignment('center');
+  dash.getRange(6, 2 + colOffset, output.length, 1).setHorizontalAlignment('center');
+  dash.getRange(6, 3 + colOffset, output.length, 2).setNumberFormat('h:mm AM/PM').setHorizontalAlignment('center');
   if (isWeekly) {
     const rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
-    dash.getRange(6, 5, output.length, 5).setDataValidation(rule).setHorizontalAlignment('center');
+    dash.getRange(6, 5 + colOffset, output.length, 5).setDataValidation(rule).setHorizontalAlignment('center');
   }
 }
 
@@ -717,7 +936,10 @@ function updateTeacherNameDropdowns() {
   const rule = SpreadsheetApp.newDataValidation().requireValueInRange(enrollSheet.getRange('B3:B1000'), true).build();
   
   if (assignSheet) assignSheet.getRange('A3:A1000').setDataValidation(rule);
-  if (dashSheet) dashSheet.getRange('B2').setDataValidation(rule);
+  if (dashSheet) {
+    dashSheet.getRange('B2').setDataValidation(rule);
+    dashSheet.getRange('L2').setDataValidation(rule);
+  }
 }
 
 function updateTeacherDropdownOptions() {
@@ -798,8 +1020,8 @@ function buildPhase3TermTabs() {
     sheet.getRange('A1:J1').merge().setValue(`📅 ${term.toUpperCase()} MASTER SCHEDULE`).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
     sheet.setRowHeight(1, 40);
 
-    const headers = ['GRADE Level', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out'];
-    sheet.getRange('A2:J2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+    const headers = ['GRADE Level', 'Subject', 'Teacher', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Time In', 'Time Out', 'Action', 'Warnings', 'Suggested Teachers'];
+    sheet.getRange('A2:M2').setValues([headers]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
     sheet.setRowHeight(2, 30);
 
     sheet.setColumnWidth(1, 150); sheet.setColumnWidth(2, 250); sheet.setColumnWidth(3, 200);
@@ -824,31 +1046,53 @@ function buildPhase4Dashboard() {
   let dash = ss.getSheetByName(CFG.DASHBOARD) || ss.insertSheet(CFG.DASHBOARD, 1); 
   dash.clear();
 
-  dash.getRange('A1:I1').merge().setValue('🏫 FACULTY LOADING — TEACHER SCHEDULE VIEWER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  dash.getRange('A1:S1').merge().setValue('🏫 FACULTY LOADING — DUAL TEACHER COMPARISON VIEWER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
   dash.setRowHeight(1, 46);
 
   const lbl = (cell, text) => dash.getRange(cell).setValue(text).setFontWeight('bold').setHorizontalAlignment('right').setFontColor(C.navy);
-  lbl('A2', '👤 Teacher'); lbl('A3', '📅 Day Filter'); lbl('A4', '📑 Term');
-  dash.getRange('D4').setValue('Status').setFontColor(C.muted).setFontSize(10).setHorizontalAlignment('right');
-
   const inputBox = (a1, bg) => dash.getRange(a1).setBackground(bg).setBorder(true,true,true,true,null,null,C.border,SpreadsheetApp.BorderStyle.SOLID).setFontColor(C.navy);
+
+  // Pane 1 (Left)
+  lbl('A2', '👤 Teacher 1'); lbl('A3', '📅 Day Filter'); lbl('A4', '📑 Term');
+  dash.getRange('D4').setValue('Status').setFontColor(C.muted).setFontSize(10).setHorizontalAlignment('right');
   inputBox('B2', C.navyLight); inputBox('B3', C.navyLight); inputBox('B4', C.navyLight);
   inputBox('C4', C.tealLight).setNumberFormat('0.0 "hrs"').setFontWeight('bold'); 
   inputBox('E4', C.tealLight).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center'); 
-  dash.setRowHeights(2, 3, 28);
 
   dash.getRange('B3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).build()).setValue('ALL WEEK');
   dash.getRange('B4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setValue(CFG.TERMS[0]);
 
   dash.getRange('A5:I5').setValues([['Subject','Grade Level','Time In','Time Out','MON','TUE','WED','THU','FRI']]).setFontWeight('bold').setFontSize(10).setBackground(C.navy).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+
+  // Spacer
+  dash.setColumnWidth(10, 20);
+  dash.getRange('J2:J1000').setBackground(C.navyLight);
+
+  // Pane 2 (Right)
+  lbl('K2', '👤 Teacher 2'); lbl('K3', '📅 Day Filter'); lbl('K4', '📑 Term');
+  dash.getRange('N4').setValue('Status').setFontColor(C.muted).setFontSize(10).setHorizontalAlignment('right');
+  inputBox('L2', C.navyLight); inputBox('L3', C.navyLight); inputBox('L4', C.navyLight);
+  inputBox('M4', C.tealLight).setNumberFormat('0.0 "hrs"').setFontWeight('bold');
+  inputBox('O4', C.tealLight).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center');
+
+  dash.getRange('L3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).build()).setValue('ALL WEEK');
+  dash.getRange('L4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setValue(CFG.TERMS[0]);
+
+  dash.getRange('K5:S5').setValues([['Subject','Grade Level','Time In','Time Out','MON','TUE','WED','THU','FRI']]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+
+  dash.setRowHeights(2, 3, 28);
   dash.setRowHeight(5, 30);
   
   dash.setColumnWidth(1, 260); dash.setColumnWidth(2, 130); dash.setColumnWidths(3, 2, 110); dash.setColumnWidths(5, 5, 52);
+  dash.setColumnWidth(11, 260); dash.setColumnWidth(12, 130); dash.setColumnWidths(13, 2, 110); dash.setColumnWidths(15, 5, 52);
+
   dash.getRange('C6:D').setNumberFormat('h:mm AM/PM');
-  dash.setFrozenRows(5); dash.showColumns(5, 5);
+  dash.getRange('M6:N').setNumberFormat('h:mm AM/PM');
+
+  dash.setFrozenRows(5); dash.showColumns(5, 5); dash.showColumns(15, 5);
   updateTeacherNameDropdowns();
 
-  ss.toast('Teacher Dashboard fully constructed.', '✅ Phase 4 Complete', 5);
+  ss.toast('Dual Teacher Dashboard fully constructed.', '✅ Phase 4 Complete', 5);
 }
 
 function buildPhase5ConflictReport() {
@@ -940,4 +1184,313 @@ function formatMinsToTime(mins) {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  SECTION 10: MASTER SECTION VISUALIZER
+// ══════════════════════════════════════════════════════════════
+
+function buildAllSectionsVisualizer() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const visName = '📚 All Sections Schedule';
+  let vis = ss.getSheetByName(visName) || ss.insertSheet(visName, 5);
+  vis.clear();
+
+  vis.getRange('A1:G1').merge().setValue('📚 MASTER SECTIONS TIMETABLE VISUALIZER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  vis.setRowHeight(1, 46);
+  vis.setColumnWidth(1, 100); vis.setColumnWidth(2, 90); vis.setColumnWidths(3, 5, 140);
+
+  let allRows = [];
+  CFG.TERMS.forEach(term => {
+     const ts = ss.getSheetByName(term);
+     if (!ts) return;
+     const lr = ts.getLastRow();
+     if (lr >= 3) {
+        const rows = ts.getRange(3, 1, lr - 2, 11).getValues();
+        allRows = allRows.concat(rows);
+     }
+  });
+
+  if (allRows.length === 0) {
+     return ss.toast('No schedules found in Term tabs to visualize.', '⚠️ Empty', 4);
+  }
+
+  const sections = [...new Set(allRows.map(r => r[0] ? r[0].toString().trim() : '').filter(String))];
+
+  sections.sort((a, b) => {
+     const matchA = a.match(/\d+/); const matchB = b.match(/\d+/);
+     const numA = matchA ? parseInt(matchA[0], 10) : 0;
+     const numB = matchB ? parseInt(matchB[0], 10) : 0;
+     if (numA !== numB) return numA - numB;
+     return a.localeCompare(b);
+  });
+
+  let currentRow = 3;
+
+  sections.forEach(section => {
+      const secRows = allRows.filter(r => r[0] && r[0].toString().trim() === section);
+      if (secRows.length === 0) return;
+
+      const isSHS = section.match(/\b(11|12)\b/) != null;
+
+      vis.getRange(currentRow, 1, 1, 7).merge().setValue('Cohort / Section: ' + section).setFontWeight('bold').setFontSize(12).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('left').setVerticalAlignment('middle');
+      currentRow++;
+
+      const headers = ['TIME', 'MINS', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY'];
+      vis.getRange(currentRow, 1, 1, 7).setValues([headers]).setFontWeight('bold').setBackground(C.navyLight).setHorizontalAlignment('center').setVerticalAlignment('middle').setBorder(true,true,true,true,true,true);
+      currentRow++;
+
+      const grid = [
+        { t: '7:00-7:30', m: 30, mon: 'Flag Raising\nCeremony', tue: 'GROUND PREPARATION/DAILY MORNING ROUTINE', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '7:30-8:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '8:30-9:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '9:30-9:45', m: 15, mon: 'RECESS/GROUP HANDWASHING', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '9:45-10:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '10:45-11:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '11:45-1:00', m: 75, mon: 'LUNCH BREAK', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '1:00-2:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '1:00-2:30', m: 90, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+        { t: '2:00-3:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '2:30-3:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+        { t: '3:00-4:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '3:30-4:00', m: 30, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+      ];
+
+      const activeGrid = grid.filter(g => isSHS ? !['1:00-2:00', '2:00-3:00', '3:00-4:00'].includes(g.t) : !g.shs);
+      let outputGrid = [];
+
+      const getSchedule = (timeStr, dayIndex) => {
+         const [inStr, outStr] = timeStr.split('-');
+         const sStart = parseTime(inStr.includes('AM') || inStr.includes('PM') ? inStr : inStr + (parseInt(inStr.split(':')[0]) < 7 || parseInt(inStr.split(':')[0]) === 12 ? ' PM' : ' AM'));
+         const matched = secRows.find(r => r[3 + dayIndex] === true && Math.abs(parseTime(r[8]) - sStart) < 15);
+         return matched ? matched[1] + '\n(' + matched[2] + ')' : '';
+      };
+
+      activeGrid.forEach(g => {
+         let m = g.mon, t = g.tue, w = g.wed, th = g.thu, f = g.fri;
+         if (!g.mergeSubj) {
+            m = getSchedule(g.t, 0) || m;
+            t = getSchedule(g.t, 1) || t;
+            w = getSchedule(g.t, 2) || w;
+            th = getSchedule(g.t, 3) || th;
+            f = getSchedule(g.t, 4) || f;
+         }
+         outputGrid.push([g.t, g.m, m, t, w, th, f]);
+      });
+
+      vis.getRange(currentRow, 1, outputGrid.length, 7).setValues(outputGrid).setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setBorder(true,true,true,true,true,true);
+
+      for (let i = 0; i < activeGrid.length; i++) {
+         const r = currentRow + i;
+         if (activeGrid[i].t === '7:00-7:30') { vis.getRange(r, 4, 1, 4).merge().setBackground('#d9d9d9'); vis.getRange(r, 3).setBackground('#d9d9d9'); }
+         if (activeGrid[i].t === '9:30-9:45') { vis.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+         if (activeGrid[i].t === '11:45-1:00') { vis.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+      }
+
+      currentRow += outputGrid.length + 2;
+  });
+
+  ss.toast('Visualizer generated successfully!', '✅ Done', 4);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  SECTION 9: PDF GENERATION (Class Programs)
+// ══════════════════════════════════════════════════════════════
+
+function generateScheduleUI() {
+  const htmlOutput = HtmlService.createHtmlOutput(`
+    <div style="font-family: Arial, sans-serif; padding: 10px;">
+      <h4>Generate Schedule PDF</h4>
+      <label><b>Mode:</b></label><br>
+      <select id="mode" style="width: 100%; padding: 5px; margin-bottom: 10px;">
+        <option value="Teacher">Per Teacher</option>
+        <option value="Section">Per Section</option>
+      </select>
+
+      <label><b>Term:</b></label><br>
+      <select id="term" style="width: 100%; padding: 5px; margin-bottom: 10px;">
+        ${CFG.TERMS.map(t => `<option value="${t}">${t}</option>`).join('')}
+      </select>
+
+      <label><b>Name (Exact text):</b></label><br>
+      <input type="text" id="targetName" placeholder="e.g. MICHELLE JANE GACUSAN or 11-Lone" style="width: 100%; padding: 5px; margin-bottom: 15px;">
+
+      <button onclick="generate()" style="background-color: #1a3a6e; color: white; border: none; padding: 8px 16px; cursor: pointer; width: 100%;">Generate PDF</button>
+
+      <p id="status" style="margin-top: 15px; font-size: 12px; color: #b71c1c;"></p>
+
+      <script>
+        function generate() {
+          const mode = document.getElementById('mode').value;
+          const term = document.getElementById('term').value;
+          const targetName = document.getElementById('targetName').value;
+
+          if (!targetName) {
+            document.getElementById('status').innerText = 'Please enter a name or section.';
+            return;
+          }
+
+          document.getElementById('status').innerText = 'Generating PDF... please wait. This may take up to 30 seconds.';
+          document.getElementById('status').style.color = '#00796b';
+
+          google.script.run.withSuccessHandler(url => {
+            if (url.startsWith('Error:')) {
+               document.getElementById('status').innerText = url;
+               document.getElementById('status').style.color = '#b71c1c';
+            } else {
+               document.getElementById('status').innerHTML = '<a href="' + url + '" target="_blank" style="color: #1a3a6e; font-weight: bold;">Click here to download/view your PDF</a>';
+            }
+          }).processPDFGeneration(mode, term, targetName);
+        }
+      </script>
+    </div>
+  `).setWidth(300).setHeight(320);
+
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, '🖨️ PDF Exporter');
+}
+
+function processPDFGeneration(mode, termName, targetName) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const termSheet = ss.getSheetByName(termName);
+    if (!termSheet) return 'Error: Term sheet not found.';
+
+    const data = termSheet.getRange(3, 1, Math.max(1, termSheet.getLastRow() - 2), 13).getValues();
+
+    // Filter matching rows
+    let rows = [];
+    if (mode === 'Teacher') {
+      rows = data.filter(r => r[2] && r[2].toString().toLowerCase() === targetName.toLowerCase());
+    } else {
+      rows = data.filter(r => r[0] && r[0].toString().toLowerCase() === targetName.toLowerCase());
+    }
+
+    if (!rows.length) return 'Error: No schedule found for ' + targetName;
+
+    return buildPDFTemplateSheetAndExport(mode, targetName, rows);
+  } catch (err) {
+    return 'Error: ' + err.toString();
+  }
+}
+
+function buildPDFTemplateSheetAndExport(mode, targetName, rows) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Create a temporary sheet
+  const tempName = 'TEMP_PDF_' + new Date().getTime();
+  const ts = ss.insertSheet(tempName);
+
+  try {
+    // 1. Setup Headers
+    if (mode === 'Teacher') {
+      ts.getRange('A1:G1').merge().setValue('Name of Teacher: ' + targetName.toUpperCase()).setFontWeight('bold').setFontSize(14);
+      const teachList = ss.getSheetByName(CFG.TEACHER_ENROLL);
+      let spec = 'UNKNOWN';
+      if (teachList) {
+         const tData = teachList.getRange(3,2,teachList.getLastRow(), 2).getValues();
+         const match = tData.find(r => r[0].toString().toLowerCase() === targetName.toLowerCase());
+         if (match) spec = match[1];
+      }
+      ts.getRange('A2:G2').merge().setValue('Specialization: ' + spec).setFontWeight('bold').setFontSize(14);
+    } else {
+      ts.getRange('A1:G1').merge().setValue('Grade Level: ' + targetName).setFontWeight('bold').setFontSize(14);
+      ts.getRange('A2:G2').merge().setValue('Name of Adviser: ').setFontWeight('bold').setFontSize(14);
+    }
+
+    // 2. Setup Table Headers
+    const headers = ['TIME', 'NO. OF MINUTES', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY'];
+    ts.getRange('A4:G4').setValues([headers]).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setBorder(true,true,true,true,true,true);
+    ts.setColumnWidth(1, 100); ts.setColumnWidth(2, 90); ts.setColumnWidths(3, 5, 130);
+
+    // 3. Define Standard Timetable grid based on screenshots
+    const grid = [
+      { t: '7:00-7:30', m: 30, mon: 'Flag Raising\nCeremony', tue: 'GROUND PREPARATION/DAILY MORNING ROUTINE', wed: '', thu: '', fri: '', mergeSubj: true },
+      { t: '7:30-8:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '8:30-9:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '9:30-9:45', m: 15, mon: 'RECESS/GROUP HANDWASHING', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+      { t: '9:45-10:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '10:45-11:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '11:45-1:00', m: 75, mon: 'LUNCH BREAK', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+      { t: '1:00-2:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '1:00-2:30', m: 90, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+      { t: '2:00-3:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '2:30-3:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+      { t: '3:00-4:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+      { t: '3:30-4:00', m: 30, mon: '', tue: '', wed: '', thu: '', fri: '', shs: true },
+    ];
+
+    const isSHS = rows.some(r => {
+       const grMatch = r[0].toString().match(/\b(11|12)\b/);
+       return grMatch != null;
+    });
+
+    const activeGrid = grid.filter(g => {
+       if (isSHS) {
+         return !['1:00-2:00', '2:00-3:00', '3:00-4:00'].includes(g.t);
+       } else {
+         return !g.shs;
+       }
+    });
+
+    let outputGrid = [];
+
+    const getSchedule = (timeStr, dayIndex) => {
+       const [inStr, outStr] = timeStr.split('-');
+       const sStart = parseTime(inStr.includes('AM') || inStr.includes('PM') ? inStr : inStr + (parseInt(inStr.split(':')[0]) < 7 || parseInt(inStr.split(':')[0]) === 12 ? ' PM' : ' AM'));
+
+       const matched = rows.find(r => {
+          if (r[3 + dayIndex] !== true) return false;
+          const rStart = parseTime(r[8]);
+          return Math.abs(rStart - sStart) < 15;
+       });
+
+       if (!matched) return '';
+
+       if (mode === 'Teacher') {
+         return matched[1] + '\n' + matched[0]; // Subject + Grade Level
+       } else {
+         return matched[1] + '\n(' + matched[2] + ')'; // Subject + Teacher
+       }
+    };
+
+    activeGrid.forEach(g => {
+       let m = g.mon, t = g.tue, w = g.wed, th = g.thu, f = g.fri;
+       if (!g.mergeSubj) {
+          m = getSchedule(g.t, 0) || m;
+          t = getSchedule(g.t, 1) || t;
+          w = getSchedule(g.t, 2) || w;
+          th = getSchedule(g.t, 3) || th;
+          f = getSchedule(g.t, 4) || f;
+       }
+       outputGrid.push([g.t, g.m, m, t, w, th, f]);
+    });
+
+    ts.getRange(5, 1, outputGrid.length, 7).setValues(outputGrid).setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setBorder(true,true,true,true,true,true);
+
+    for (let i = 0; i < activeGrid.length; i++) {
+       const r = 5 + i;
+       if (activeGrid[i].t === '7:00-7:30') { ts.getRange(r, 4, 1, 4).merge().setBackground('#d9d9d9'); ts.getRange(r, 3).setBackground('#d9d9d9'); }
+       if (activeGrid[i].t === '9:30-9:45') { ts.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+       if (activeGrid[i].t === '11:45-1:00') { ts.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+    }
+
+    SpreadsheetApp.flush();
+    const url = ss.getUrl().replace(/edit$/, '') + 'export?exportFormat=pdf&format=pdf' +
+      '&size=A4&portrait=false&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false' +
+      '&gridlines=false&fzr=false&gid=' + ts.getSheetId();
+
+    const token = ScriptApp.getOAuthToken();
+    const response = UrlFetchApp.fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+
+    const blob = response.getBlob().setName(targetName + '_Schedule.pdf');
+    const file = DriveApp.createFile(blob);
+
+    ss.deleteSheet(ts);
+
+    return file.getUrl();
+  } catch (err) {
+    if (ts) ss.deleteSheet(ts);
+    return 'Error creating PDF: ' + err.toString();
+  }
 }
