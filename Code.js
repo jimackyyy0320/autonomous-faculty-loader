@@ -15,7 +15,6 @@ const CFG = {
   SECTION_ENROLL: 'Section Enrollment',
   SUBJECT_LOAD:   'Subject Loading',
   TEACHER_ENROLL: 'Teacher Enrollment',
-  TEACHER_ASSIGN: 'Teacher Assignment',
   TERMS:          ['Term 1', 'Term 2', 'Term 3'],
   DASHBOARD:      'Teacher Dashboard',
 
@@ -80,7 +79,7 @@ function onEdit(e) {
   }
 
   // 4.6 Subject Loading Live Updates
-  if (sheetName === CFG.SUBJECT_LOAD && row > 2 && col <= 4) {
+  if (sheetName === CFG.SUBJECT_LOAD && row > 2 && col <= 5) {
     updateSubjectLoadingHours();
   }
 
@@ -88,7 +87,7 @@ function onEdit(e) {
   if (sheetName === CFG.SECTION_ENROLL || sheetName === CFG.SUBJECT_LOAD || sheetName === CFG.TEACHER_ENROLL) {
     cleanOrphanedData();
     if (sheetName === CFG.SECTION_ENROLL) updateSectionDropdowns();
-    if (sheetName === CFG.SUBJECT_LOAD) updateTeacherDropdownOptions();
+
     if (sheetName === CFG.TEACHER_ENROLL) updateTeacherNameDropdowns();
   }
 
@@ -125,10 +124,9 @@ function runRecalculateSchedule() {
 function runAutoScheduler(isReshuffle = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
-  const assignSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
   const enrollSheet = ss.getSheetByName(CFG.TEACHER_ENROLL);
 
-  if (!subSheet || !assignSheet || !enrollSheet) {
+  if (!subSheet || !enrollSheet) {
     return ss.toast('Please ensure your Data tabs are set up first.', '👋 Note', 5);
   }
 
@@ -139,12 +137,8 @@ function runAutoScheduler(isReshuffle = false) {
     return lr < 3 ? [] : sheet.getRange(3, 1, lr - 2, numCols).getValues();
   };
 
-  const demands = getSafeData(subSheet, 4).filter(r => r[0] && r[1] && r[2]);
-  const assignments = getSafeData(assignSheet, 3).filter(r => r[0]);
+  const demands = getSafeData(subSheet, 5).filter(r => r[0] && r[1] && r[2]); // Col E is Assigned Teacher
   const teachers = getSafeData(enrollSheet, 3).filter(r => r[1]);
-
-  const assignMap = {};
-  assignments.forEach(a => assignMap[`${a[1].toString().trim()}|${a[2].toString().trim()}`] = a[0]);
 
   CFG.TERMS.forEach(term => {
     const ts = ss.getSheetByName(term);
@@ -180,7 +174,7 @@ function runAutoScheduler(isReshuffle = false) {
       const hrs = parseFloat(d[3]) || 0;
 
       const learnedTeacher = props.getProperty('LEARNED_' + subj + '|' + sec);
-      const teacher = learnedTeacher || assignMap[`${subj}|${sec}`] || '⚠️ Unassigned';
+      const teacher = learnedTeacher || (d[4] ? d[4].toString().trim() : '') || '⚠️ Unassigned';
 
       if (!tBooked[teacher] && teacher !== 'Unavailable Teacher' && teacher !== '⚠️ Unassigned') {
           tBooked[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[], sectionsMet: { 1:new Set(), 2:new Set(), 3:new Set(), 4:new Set(), 5:new Set() } };
@@ -196,9 +190,11 @@ function runAutoScheduler(isReshuffle = false) {
       const gradeMatch = sec.match(/\b(11|12|7|8|9|10)\b/);
       const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
 
-      let durationMins = 60; // Default 1 hour
+      let durationMins = 60; // Minimum 1 hour unless Homeroom
       if (isPhilGov) durationMins = 90;
-      else if (hrs % 1 === 0.5) durationMins = 90; // Fractional weekly hours end in .5 -> 90 mins
+      else if (hrs % 1 === 0.5 && !isHomeroom) durationMins = 90; // Fractional weekly hours end in .5 -> 90 mins
+
+      if (isHomeroom && hrs === 0.5) durationMins = 30; // Homeroom exception
 
       const isAral = subj.match(/\bARAL\b/i) && !subj.toLowerCase().includes('panlipunan');
       if (isAral) durationMins = 60; // ARAL exactly 1 hour
@@ -349,7 +345,11 @@ function runAutoScheduler(isReshuffle = false) {
 
                 // 1. Durations & Boundaries
                 let blockDur = d.durationMins;
-                if (d.hoursLeft * 60 < blockDur) blockDur = d.hoursLeft * 60; // Truncate last block
+                if (d.hoursLeft * 60 < blockDur) {
+                    blockDur = d.hoursLeft * 60; // Truncate last block
+                }
+                // Minimum 1 hour rule unless Homeroom
+                if (!d.isHomeroom && blockDur < 60) blockDur = 60;
                 const endTime = time + blockDur;
 
                 // Crosses Recess or Lunch boundary? Invalid.
@@ -1088,37 +1088,25 @@ function cleanOrphanedData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const secSheet = ss.getSheetByName(CFG.SECTION_ENROLL);
   const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
-  const teachAssignSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
   const teachEnrollSheet = ss.getSheetByName(CFG.TEACHER_ENROLL);
 
-  if (!secSheet || !subSheet || !teachAssignSheet || !teachEnrollSheet) return;
+  if (!secSheet || !subSheet || !teachEnrollSheet) return;
 
   const validSections = new Set(secSheet.getRange('B3:B').getValues().flat().filter(String));
-  const validSubjects = new Set(subSheet.getRange('C3:C').getValues().flat().filter(String));
   const validTeachers = new Set(teachEnrollSheet.getRange('B3:B').getValues().flat().filter(String));
+  validTeachers.add('Unavailable Teacher');
+  validTeachers.add('⚠️ Unassigned');
 
   const subLastRow = Math.max(3, subSheet.getLastRow());
-  const subRange = subSheet.getRange('B3:B' + subLastRow);
+  const subRange = subSheet.getRange('B3:E' + subLastRow); // Get Section and Teacher
   const subValues = subRange.getValues();
   let subChanged = false;
 
   subValues.forEach(row => {
     if (row[0] && !validSections.has(row[0])) { row[0] = ''; subChanged = true; }
+    if (row[3] && !validTeachers.has(row[3])) { row[3] = ''; subChanged = true; } // row[3] is Column E
   });
   if (subChanged) subRange.setValues(subValues);
-
-  const teachLastRow = Math.max(3, teachAssignSheet.getLastRow());
-  const teachRange = teachAssignSheet.getRange('A3:C' + teachLastRow);
-  const teachValues = teachRange.getValues();
-  let teachChanged = false;
-
-  teachValues.forEach(row => {
-    if (row[0] && !validTeachers.has(row[0])) { row[0] = ''; teachChanged = true; }
-    if (row[1] && !validSubjects.has(row[1])) { row[1] = ''; teachChanged = true; }
-    if (row[2] && !validSections.has(row[2])) { row[2] = ''; teachChanged = true; }
-  });
-
-  if (teachChanged) teachRange.setValues(teachValues);
 }
 
 function updateSectionDropdowns() {
@@ -1137,7 +1125,7 @@ function updateSectionDropdowns() {
 function updateTeacherNameDropdowns() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const enrollSheet = ss.getSheetByName(CFG.TEACHER_ENROLL);
-  const assignSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
+  const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
   const dashSheet   = ss.getSheetByName(CFG.DASHBOARD);
 
   if (!enrollSheet) return;
@@ -1147,25 +1135,14 @@ function updateTeacherNameDropdowns() {
   tVals.push('⚠️ Unassigned');
   const rule = SpreadsheetApp.newDataValidation().requireValueInList(tVals, true).build();
 
-  if (assignSheet) assignSheet.getRange('A3:A1000').setDataValidation(rule);
+  if (subSheet) subSheet.getRange('E3:E1000').setDataValidation(rule);
   if (dashSheet) {
     dashSheet.getRange('B2').setDataValidation(rule);
     dashSheet.getRange('L2').setDataValidation(rule);
   }
 }
 
-function updateTeacherDropdownOptions() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
-  const teachSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN);
-  if (!subSheet || !teachSheet) return;
 
-  const subjectRule = SpreadsheetApp.newDataValidation().requireValueInRange(subSheet.getRange('C3:C1000'), true).build();
-  teachSheet.getRange('B3:B1000').setDataValidation(subjectRule);
-
-  const sectionRule = SpreadsheetApp.newDataValidation().requireValueInRange(subSheet.getRange('B3:B1000'), true).build();
-  teachSheet.getRange('C3:C1000').setDataValidation(sectionRule);
-}
 
 // ══════════════════════════════════════════════════════════════
 //  SECTION 7: TAB BUILDERS (Phases 1-6)
@@ -1185,11 +1162,12 @@ function buildPhase1Tabs() {
 
   let subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD) || ss.insertSheet(CFG.SUBJECT_LOAD, 1);
   subSheet.clear();
-  subSheet.getRange('A1:E1').merge().setValue('📚 SUBJECT LOADING (CURRICULUM DEMAND)').setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  subSheet.getRange('A2:E2').setValues([['Term', 'Section', 'Subject', 'Weekly Class Hours', 'Hours Loaded']]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  subSheet.setColumnWidth(1, 120); subSheet.setColumnWidth(2, 200); subSheet.setColumnWidth(3, 250); subSheet.setColumnWidth(4, 150); subSheet.setColumnWidth(5, 150);
-  subSheet.getRange('A3:E1000').setFontColor(C.body).setVerticalAlignment('middle');
-  subSheet.getRange('D3:E1000').setNumberFormat('0.0').setHorizontalAlignment('center');
+  subSheet.getRange('A1:G1').merge().setValue('📚 SUBJECT LOADING (CURRICULUM DEMAND & ASSIGNMENT)').setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  subSheet.getRange('A2:G2').setValues([['Term', 'Section', 'Subject', 'Weekly Class Hours', 'Assigned Teacher', 'Hours Loaded', 'Balance']]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  subSheet.setColumnWidth(1, 120); subSheet.setColumnWidth(2, 200); subSheet.setColumnWidth(3, 250); subSheet.setColumnWidth(4, 150); subSheet.setColumnWidth(5, 200); subSheet.setColumnWidth(6, 120); subSheet.setColumnWidth(7, 120);
+  subSheet.getRange('A3:G1000').setFontColor(C.body).setVerticalAlignment('middle');
+  subSheet.getRange('D3:D1000').setNumberFormat('0.0').setHorizontalAlignment('center');
+  subSheet.getRange('F3:G1000').setNumberFormat('0.0').setHorizontalAlignment('center');
   subSheet.getRange('A3:A1000').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setHorizontalAlignment('center');
   subSheet.setFrozenRows(2);
 
@@ -1210,17 +1188,8 @@ function buildPhase2TeacherTabs() {
   enrollSheet.getRange('C3:C1000').setHorizontalAlignment('center');
   enrollSheet.setFrozenRows(2);
 
-  let assignSheet = ss.getSheetByName(CFG.TEACHER_ASSIGN) || ss.insertSheet(CFG.TEACHER_ASSIGN, 3);
-  assignSheet.clear();
-  assignSheet.getRange('A1:C1').merge().setValue('👤 FACULTY ASSIGNMENTS & PREFERENCES').setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  assignSheet.getRange('A2:C2').setValues([['Teacher Name', 'Assigned Subject', 'Assigned Section']]).setFontWeight('bold').setFontSize(10).setBackground(C.navy).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  assignSheet.setColumnWidth(1, 250); assignSheet.setColumnWidth(2, 250); assignSheet.setColumnWidth(3, 200);
-  assignSheet.getRange('A3:C1000').setFontColor(C.body).setVerticalAlignment('middle');
-  assignSheet.setFrozenRows(2);
-
   updateTeacherNameDropdowns();
-  updateTeacherDropdownOptions();
-  ss.toast('Teacher Enrollment and Assignment tabs initialized.', '✅ Phase 2 Complete', 5);
+  ss.toast('Teacher Enrollment initialized.', '✅ Phase 2 Complete', 5);
 }
 
 function buildPhase3TermTabs() {
@@ -1335,7 +1304,7 @@ function updateSubjectLoadingHours() {
   if (!subSheet) return;
 
   const lr = Math.max(3, subSheet.getLastRow());
-  const demands = subSheet.getRange(3, 1, lr - 2, 4).getValues(); // We read up to Col D
+  const demands = subSheet.getRange(3, 1, lr - 2, 4).getValues(); // Read up to Col D (Weekly Class Hours)
 
   // Aggregate all loaded hours from Term tabs
   const loadedMap = {};
@@ -1374,21 +1343,22 @@ function updateSubjectLoadingHours() {
      const key = d[0] + '|' + d[1] + '|' + d[2];
      const req = parseFloat(d[3]) || 0;
      const loaded = loadedMap[key] || 0;
+     const balance = req - loaded;
 
      if (!d[0] || !d[1] || !d[2]) {
-         output.push(['']);
-         bgColors.push([C.white]);
+         output.push(['', '']);
+         bgColors.push([C.white, C.white]);
      } else {
-         output.push([loaded]);
+         output.push([loaded, balance]);
          // Status coloring
-         if (loaded < req) bgColors.push([C.warnBg]);
-         else if (loaded > req) bgColors.push([C.errorBg]);
-         else bgColors.push([C.okBg]);
+         if (loaded < req) bgColors.push([C.warnBg, C.warnBg]);
+         else if (loaded > req) bgColors.push([C.errorBg, C.errorBg]);
+         else bgColors.push([C.okBg, C.okBg]);
      }
   });
 
   if (output.length > 0) {
-      subSheet.getRange(3, 5, output.length, 1).setValues(output).setBackgrounds(bgColors);
+      subSheet.getRange(3, 6, output.length, 2).setValues(output).setBackgrounds(bgColors);
   }
 }
 
