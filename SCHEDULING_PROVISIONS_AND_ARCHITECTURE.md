@@ -4,22 +4,22 @@ This document serves as the strict rulebook and reference map for the Google App
 
 ## The Architecture Map
 
-The system has transitioned from a deterministic dense-packing loop to an AI-driven inference engine utilizing the Gemini API. The flow of data is as follows:
+The system has transitioned from a deterministic dense-packing loop to an AI-driven inference engine utilizing the OpenRouter API. The flow of data is as follows:
 
 1. **Data Extraction:** The \`runAutoScheduler\` function acts as the central data packager. It reads master arrays from:
    - \`SECTION_ENROLL\`
    - \`SUBJECT_LOAD\` (which includes the assigned teacher and weekly hours)
    - \`TEACHER_ENROLL\`
 2. **Payload Construction:** The data is transformed into a lightweight JSON payload detailing the demands per term and the roster of available teachers (with their specializations).
-3. **API Invocation:** The \`fetchGeminiSchedule\` function takes this payload and constructs a strict prompt containing all non-negotiable scheduling constraints.
-   - It utilizes \`UrlFetchApp\` to make a POST request to the Gemini API.
+3. **API Invocation:** The \`fetchOpenRouterSchedule\` function takes this payload and constructs a strict prompt containing all non-negotiable scheduling constraints.
+   - It utilizes \`UrlFetchApp\` to make a POST request to the OpenRouter API.
    - **Crucial:** It enforces Structured Outputs using JSON mode (\`responseSchema\`) to guarantee the AI returns an array of objects perfectly matching the 13-column Term tab format.
-   - The API key is securely retrieved using \`PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY')\`. **Never hardcode the key.**
+   - The API key is securely retrieved using \`PropertiesService.getScriptProperties().getProperty('OPENROUTER_API_KEY')\`. **Never hardcode the key.**
 4. **Data Injection:** The returned JSON is parsed. The \`writeScheduleToSheet\` function maps the objects back into 2D arrays and uses \`setValues\` to render the final schedule onto the respective Term tabs.
 
 ## The Constraints Ledger
 
-The Gemini API prompt is explicitly fed the following hard and soft constraints. Any modification to how schedules are plotted must begin by updating these prompt rules:
+The OpenRouter API prompt is explicitly fed the following hard and soft constraints. Any modification to how schedules are plotted must begin by updating these prompt rules:
 
 - **Lunch Break:** Strictly locked between **11:45 AM - 1:00 PM**. No classes may be scheduled during this block.
 - **Recess Break:** Strictly locked between **9:30 AM - 9:45 AM**. No classes may be scheduled during this block.
