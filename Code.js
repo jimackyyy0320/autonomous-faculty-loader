@@ -58,8 +58,8 @@ function onOpen() {
     .addItem('6️⃣ Build: AI Feedback Workspace', 'buildAIFeedbackWorkspace')
     .addItem('7️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer')
     .addSeparator()
-    .addItem('🚀 RUN GEMINI AUTO-SCHEDULER', 'runAutoScheduler')
-    .addItem('🤖 VALIDATE AI PROVISION', 'validateProvisionWithAI')
+    .addItem('🚀 RUN OPENROUTER AUTO-SCHEDULER', 'runAutoScheduler')
+    .addItem('🤖 VALIDATE AI PROVISION', 'validateProvisionWithOpenRouter')
     .addItem('🔄 RECALCULATE SCHEDULE', 'runRecalculateSchedule')
     .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
     .addSeparator()
@@ -132,7 +132,7 @@ function runAutoScheduler(isReshuffle = false) {
     return ss.toast('Please ensure your Data tabs are set up first.', '👋 Note', 5);
   }
 
-  ss.toast('Packaging data for Gemini AI...', '🧠 Computing', 4);
+  ss.toast('Packaging data for OpenRouter AI...', '🧠 Computing', 4);
 
   const getSafeData = (sheet, numCols) => {
     const lr = sheet.getLastRow();
@@ -172,21 +172,19 @@ function runAutoScheduler(isReshuffle = false) {
       }))
     };
 
-    fetchGeminiSchedule(ss, term, payload);
+    fetchOpenRouterSchedule(ss, term, payload);
   });
 
   if (typeof updateSubjectLoadingHours === 'function') updateSubjectLoadingHours();
 }
 
-function fetchGeminiSchedule(ss, term, payload) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+function fetchOpenRouterSchedule(ss, term, payload) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('OPENROUTER_API_KEY');
   if (!apiKey) {
-    return ss.toast('Error: GEMINI_API_KEY missing in Script Properties. Add your key.', '⚠️ API Error', 10);
+    return ss.toast('Error: OPENROUTER_API_KEY missing in Script Properties. Add your key.', '⚠️ API Error', 10);
   }
 
-  const prompt = `You are an expert school auto-scheduler. I am providing you with the teaching demands and available teachers for ${term}.
-
-Payload: ${JSON.stringify(payload)}
+  const systemPrompt = `You are an expert school auto-scheduler. I am providing you with the teaching demands and available teachers.
 
 You must generate a schedule that perfectly maps every subject requirement to the following 13 columns exactly as expected in the Google Sheet:
 ["Section", "Subject", "Teacher", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Time In", "Time Out", "Action", "Warnings", "Suggested Teachers"]
@@ -207,69 +205,61 @@ CRITICAL SCHEDULING CONSTRAINTS:
 13. Time In and Time Out should be formatted as "h:mm AM/PM" (e.g., "7:30 AM").
 14. Action is always "—".
 
-Return ONLY a JSON object with a single root key "schedule" containing an array of objects. Each object must have keys matching the 13 columns exactly (case-sensitive).
-`;
+Return ONLY a raw JSON object with a single root key "schedule" containing an array of objects. Each object must have keys matching the 13 columns exactly (case-sensitive).`;
+
+  const userPrompt = `Payload for ${term}: ${JSON.stringify(payload)}`;
 
   const apiPayload = {
-    "contents": [{
-      "parts": [{ "text": prompt }]
-    }],
-    "generationConfig": {
-        "responseMimeType": "application/json",
-        "responseSchema": {
-            "type": "OBJECT",
-            "properties": {
-                "schedule": {
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "Section": { "type": "STRING" },
-                            "Subject": { "type": "STRING" },
-                            "Teacher": { "type": "STRING" },
-                            "Monday": { "type": "BOOLEAN" },
-                            "Tuesday": { "type": "BOOLEAN" },
-                            "Wednesday": { "type": "BOOLEAN" },
-                            "Thursday": { "type": "BOOLEAN" },
-                            "Friday": { "type": "BOOLEAN" },
-                            "Time In": { "type": "STRING" },
-                            "Time Out": { "type": "STRING" },
-                            "Action": { "type": "STRING" },
-                            "Warnings": { "type": "STRING" },
-                            "Suggested Teachers": { "type": "STRING" }
-                        },
-                        "required": ["Section", "Subject", "Teacher", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Time In", "Time Out", "Action", "Warnings", "Suggested Teachers"]
-                    }
-                }
-            }
-        }
-    }
+    "model": "openrouter/free",
+    "response_format": { "type": "json_object" },
+    "messages": [
+      { "role": "system", "content": systemPrompt },
+      { "role": "user", "content": userPrompt }
+    ]
   };
 
   const options = {
     'method': 'post',
     'contentType': 'application/json',
+    'headers': {
+      'Authorization': 'Bearer ' + apiKey
+    },
     'payload': JSON.stringify(apiPayload),
     'muteHttpExceptions': true
   };
 
   try {
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + apiKey;
+    const url = 'https://openrouter.ai/api/v1/chat/completions';
     const response = UrlFetchApp.fetch(url, options);
-    const json = JSON.parse(response.getContentText());
+    const responseText = response.getContentText();
 
-    if (json.candidates && json.candidates.length > 0) {
-      let aiResponseText = json.candidates[0].content.parts[0].text;
+    // Check for HTTP errors before parsing
+    if (response.getResponseCode() !== 200) {
+        throw new Error('HTTP ' + response.getResponseCode() + ': ' + responseText);
+    }
+
+    const json = JSON.parse(responseText);
+
+    if (json.choices && json.choices.length > 0) {
+      let aiResponseText = json.choices[0].message.content;
+
+      // Attempt to clean markdown block formatting if the AI includes it despite instructions
+      if (aiResponseText.startsWith('```json')) {
+          aiResponseText = aiResponseText.replace(/^```json\n/, '').replace(/\n```$/, '');
+      } else if (aiResponseText.startsWith('```')) {
+          aiResponseText = aiResponseText.replace(/^```\n/, '').replace(/\n```$/, '');
+      }
+
       let scheduleData = JSON.parse(aiResponseText).schedule;
 
       if (scheduleData && scheduleData.length > 0) {
           writeScheduleToSheet(ss, term, scheduleData);
-          ss.toast(`Successfully generated ${term} schedule using Gemini.`, '✅ Success', 5);
+          ss.toast(`Successfully generated ${term} schedule using OpenRouter.`, '✅ Success', 5);
       } else {
-          ss.toast(`Gemini returned empty schedule for ${term}.`, '⚠️ Warning', 5);
+          ss.toast(`OpenRouter returned empty schedule for ${term}.`, '⚠️ Warning', 5);
       }
     } else {
-      ss.toast('Error parsing Gemini response: ' + response.getContentText(), '⚠️ API Error', 10);
+      ss.toast('Error parsing OpenRouter response: ' + responseText, '⚠️ API Error', 10);
     }
   } catch (e) {
     ss.toast('API Request Failed: ' + e.toString(), '⚠️ Error', 10);
@@ -1446,7 +1436,7 @@ function buildPDFTemplateSheetAndExport(mode, targetName, rows) {
   }
 }
 
-function validateProvisionWithAI() {
+function validateProvisionWithOpenRouter() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ws = ss.getSheetByName('AI Feedback Workspace');
   if (!ws) {
@@ -1460,34 +1450,46 @@ function validateProvisionWithAI() {
 
   ws.getRange('B2').setValue('⏳ Thinking...').setFontColor(C.muted);
 
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const apiKey = PropertiesService.getScriptProperties().getProperty('OPENROUTER_API_KEY');
   if (!apiKey) {
-    ws.getRange('B2').setValue('Error: GEMINI_API_KEY missing in Script Properties.');
+    ws.getRange('B2').setValue('Error: OPENROUTER_API_KEY missing in Script Properties.');
     return;
   }
 
-  const prompt = `Analyze the following proposed scheduling rule for a school faculty loading system:\n\n"${rule}"\n\nEvaluate this rule against standard school scheduling logic. You must reply strictly with either the word EXECUTABLE or IMPOSSIBLE, followed by a colon and exactly two sentences explaining potential bottlenecks or implications.`;
+  const systemPrompt = "You are an expert school scheduling analyst. Evaluate the rule provided by the user against standard school scheduling logic. You must reply strictly with either the word EXECUTABLE or IMPOSSIBLE, followed by a colon and exactly two sentences explaining potential bottlenecks or implications.";
+  const userPrompt = "Analyze the following proposed scheduling rule:\n\n\"" + rule + "\"";
 
   const payload = {
-    "contents": [{
-      "parts": [{ "text": prompt }]
-    }]
+    "model": "openrouter/free",
+    "messages": [
+      { "role": "system", "content": systemPrompt },
+      { "role": "user", "content": userPrompt }
+    ]
   };
 
   const options = {
     'method': 'post',
     'contentType': 'application/json',
+    'headers': {
+      'Authorization': 'Bearer ' + apiKey
+    },
     'payload': JSON.stringify(payload),
     'muteHttpExceptions': true
   };
 
   try {
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + apiKey;
+    const url = 'https://openrouter.ai/api/v1/chat/completions';
     const response = UrlFetchApp.fetch(url, options);
+
+    if (response.getResponseCode() !== 200) {
+        ws.getRange('B2').setValue('HTTP Error: ' + response.getContentText());
+        return;
+    }
+
     const json = JSON.parse(response.getContentText());
 
-    if (json.candidates && json.candidates.length > 0) {
-      let aiText = json.candidates[0].content.parts[0].text;
+    if (json.choices && json.choices.length > 0) {
+      let aiText = json.choices[0].message.content;
       ws.getRange('B2').setValue(aiText.trim()).setFontColor(C.body);
     } else {
       ws.getRange('B2').setValue('Error parsing AI response: ' + response.getContentText());
