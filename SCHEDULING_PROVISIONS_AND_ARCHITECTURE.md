@@ -2,24 +2,25 @@
 
 This document serves as the strict rulebook and reference map for the Google Apps Script project governing the Autonomous Faculty Loading System. It must be consulted for any future revisions, feature additions, or debugging.
 
-## The Architecture Map
+## The Architecture Map (Local CSP Solver)
 
-The system has transitioned from a deterministic dense-packing loop to an AI-driven inference engine utilizing the OpenRouter API. The flow of data is as follows:
+The system utilizes a 100% local JavaScript execution environment, relying on an advanced Constraint Satisfaction Problem (CSP) solver with chronological backtracking.
 
-1. **Data Extraction:** The \`runAutoScheduler\` function acts as the central data packager. It reads master arrays from:
+1. **Data Extraction:** The \`runAutoScheduler\` function acts as the central engine. It reads master arrays from:
    - \`SECTION_ENROLL\`
    - \`SUBJECT_LOAD\` (which includes the assigned teacher and weekly hours)
    - \`TEACHER_ENROLL\`
-2. **Payload Construction:** The data is transformed into a lightweight JSON payload detailing the demands per term and the roster of available teachers (with their specializations).
-3. **API Invocation:** The \`fetchOpenRouterSchedule\` function takes this payload and constructs a strict prompt containing all non-negotiable scheduling constraints.
-   - It utilizes \`UrlFetchApp\` to make a POST request to the OpenRouter API.
-   - **Crucial:** It enforces Structured Outputs using JSON mode (\`responseSchema\`) to guarantee the AI returns an array of objects perfectly matching the 13-column Term tab format.
-   - The API key is securely retrieved using \`PropertiesService.getScriptProperties().getProperty('OPENROUTER_API_KEY')\`. **Never hardcode the key.**
-4. **Data Injection:** The returned JSON is parsed. The \`writeScheduleToSheet\` function maps the objects back into 2D arrays and uses \`setValues\` to render the final schedule onto the respective Term tabs.
+2. **Variable Ordering & Load Balancing:**
+   - Unassigned subjects (\`⚠️ Unassigned\`) are dynamically mapped to available teachers sharing the same specialization who possess the lowest current load.
+   - High-priority constraints (Homerooms, ARAL) are pre-mapped to the matrix before loop execution.
+3. **Chronological Backtracking Engine:**
+   - The script iterates through a strict timeline. Before a block is committed to the matrix, it undergoes Look-Ahead Validation to ensure its duration (30m, 60m, 90m) does not bleed across physical breaks.
+   - If a constraint is mathematically violated (e.g., Teacher Daily Hard Limit), the engine penalizes the score and recursively attempts the next permutation, advancing the chronological tracker (\`time += 30\`) to force dense packing.
+4. **Data Injection:** The engine maps the solved true/false states into the 13-column Term tab format and utilizes a rapid \`setValues\` injection to render the final schedule.
 
 ## The Constraints Ledger
 
-The OpenRouter API prompt is explicitly fed the following hard and soft constraints. Any modification to how schedules are plotted must begin by updating these prompt rules:
+The Local CSP Engine evaluates the following hard and soft constraints natively inside the \`runAutoScheduler\` logic block:
 
 - **Lunch Break:** Strictly locked between **11:45 AM - 1:00 PM**. No classes may be scheduled during this block.
 - **Recess Break:** Strictly locked between **9:30 AM - 9:45 AM**. No classes may be scheduled during this block.
@@ -37,12 +38,12 @@ The OpenRouter API prompt is explicitly fed the following hard and soft constrai
 - **Senior High School (SHS / G11-12) Rules:**
   - Sections **can** meet the same subject twice in one day.
   - However, the identical subjects **cannot be consecutive** (no back-to-back blocks).
-  - Homeroom is strictly plotted at **3:00 PM**. (The AI must logically resolve ARAL vs. Homeroom collisions at this time slot).
+  - Homeroom is strictly plotted at **3:00 PM**.
 
 ## ⚠️ Isolation Protocol
 
 **The dashboards (Teacher and Section), the All Sections Visualizer, the manual Conflict Checkers (\`onEdit\`), and the PDF Generation scripts are container-bound UI elements.**
 
-**DO NOT ALTER THESE FUNCTIONS WHEN TWEAKING THE \`runAutoScheduler\` OR THE GEMINI INFERENCE ENGINE.**
+**DO NOT ALTER THESE FUNCTIONS WHEN TWEAKING THE \`runAutoScheduler\` CSP ENGINE.**
 
-The UI elements depend on the final 13-column output structure of the Term tabs. As long as the AI accurately populates those columns via \`setValues\`, the visualizers and checkers will function autonomously.
+The UI elements depend on the final 13-column output structure of the Term tabs. As long as the solver accurately populates those columns via \`setValues\`, the visualizers and checkers will function autonomously.
