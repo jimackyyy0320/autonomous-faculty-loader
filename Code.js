@@ -55,9 +55,11 @@ function onOpen() {
     .addItem('3️⃣ Build: Phase 3 Term Tabs', 'buildPhase3TermTabs')
     .addItem('4️⃣ Build: Phase 4 Teacher Dash', 'buildPhase4Dashboard')
     .addItem('5️⃣ Build: Phase 5 Conflict Report', 'buildPhase5ConflictReport')
-    .addItem('7️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer') // NEW VISUALIZER
+    .addItem('6️⃣ Build: AI Feedback Workspace', 'buildAIFeedbackWorkspace')
+    .addItem('7️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer')
     .addSeparator()
-    .addItem('🚀 RUN AUTO-SCHEDULER', 'runAutoScheduler')
+    .addItem('🚀 RUN GEMINI AUTO-SCHEDULER', 'runAutoScheduler')
+    .addItem('🤖 VALIDATE AI PROVISION', 'validateProvisionWithAI')
     .addItem('🔄 RECALCULATE SCHEDULE', 'runRecalculateSchedule')
     .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
     .addSeparator()
@@ -130,7 +132,7 @@ function runAutoScheduler(isReshuffle = false) {
     return ss.toast('Please ensure your Data tabs are set up first.', '👋 Note', 5);
   }
 
-  ss.toast('Running Strict Timeline-First Algorithm...', '🧠 Computing', 4);
+  ss.toast('Packaging data for Gemini AI...', '🧠 Computing', 4);
 
   const getSafeData = (sheet, numCols) => {
     const lr = sheet.getLastRow();
@@ -141,6 +143,10 @@ function runAutoScheduler(isReshuffle = false) {
   const teachers = getSafeData(enrollSheet, 3).filter(r => r[1]);
 
   CFG.TERMS.forEach(term => {
+    const termDemands = demands.filter(d => d[0] === term);
+    if (!termDemands.length) return;
+
+    // Clear existing tab data
     const ts = ss.getSheetByName(term);
     if (ts) {
       const lr = ts.getLastRow();
@@ -151,435 +157,141 @@ function runAutoScheduler(isReshuffle = false) {
         ts.getRange(3, 11, lr - 2, 1).setDataValidation(actionRule);
       }
     }
+
+    const payload = {
+      term: term,
+      demands: termDemands.map(d => ({
+        section: d[1].toString().trim(),
+        subject: d[2].toString().trim(),
+        weeklyHours: parseFloat(d[3]) || 0,
+        assignedTeacher: d[4] ? d[4].toString().trim() : '⚠️ Unassigned'
+      })),
+      teachers: teachers.map(t => ({
+        name: t[1].toString().trim(),
+        specialization: t[2] ? t[2].toString().trim() : 'None'
+      }))
+    };
+
+    fetchGeminiSchedule(ss, term, payload);
   });
 
-  let unmappedLog = [];
-  const props = PropertiesService.getDocumentProperties();
+  if (typeof updateSubjectLoadingHours === 'function') updateSubjectLoadingHours();
+}
 
-  CFG.TERMS.forEach(term => {
-    const termDemands = demands.filter(d => d[0] === term);
-    if (!termDemands.length) return;
+function fetchGeminiSchedule(ss, term, payload) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) {
+    return ss.toast('Error: GEMINI_API_KEY missing in Script Properties. Add your key.', '⚠️ API Error', 10);
+  }
 
-    const tBooked = {};
-    const tBookedMins = {};
-    const tBookedSubjects = {}; // Tracks { day: Set(subject_section) } for non-consecutive rules
-    const cBooked = {};
-    const outputRows = [];
+  const prompt = `You are an expert school auto-scheduler. I am providing you with the teaching demands and available teachers for ${term}.
 
-    // Initialize tracking structures
-    const sectionDemands = {};
-    termDemands.forEach(d => {
-      const sec = d[1].toString().trim();
-      const subj = d[2].toString().trim();
-      const hrs = parseFloat(d[3]) || 0;
+Payload: ${JSON.stringify(payload)}
 
-      const learnedTeacher = props.getProperty('LEARNED_' + subj + '|' + sec);
-      const teacher = learnedTeacher || (d[4] ? d[4].toString().trim() : '') || '⚠️ Unassigned';
+You must generate a schedule that perfectly maps every subject requirement to the following 13 columns exactly as expected in the Google Sheet:
+["Section", "Subject", "Teacher", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Time In", "Time Out", "Action", "Warnings", "Suggested Teachers"]
 
-      if (!tBooked[teacher] && teacher !== 'Unavailable Teacher' && teacher !== '⚠️ Unassigned') {
-          tBooked[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[], sectionsMet: { 1:new Set(), 2:new Set(), 3:new Set(), 4:new Set(), 5:new Set() } };
-          tBookedMins[teacher] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
-          tBookedSubjects[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
+CRITICAL SCHEDULING CONSTRAINTS:
+1. Lunch: Strictly 11:45 AM - 1:00 PM (No classes allowed).
+2. Recess: Strictly 9:30 AM - 9:45 AM (No classes allowed).
+3. ARAL Subject: Must be strictly placed at 3:00 PM - 4:00 PM.
+4. Homeroom Duration: Exactly 30 minutes.
+5. Phil Gov Subject Duration: Exactly 90 minutes.
+6. Standard Subjects Duration: Minimum 60 minutes. Fractional weekly hours (e.g., 2.5) should utilize a 90-minute block for the remainder.
+7. Teacher Daily Limits: Maximum 6 hours daily hard limit. Soft limit of 4.5 hours (flag with "🟠 >4.5h Soft Limit" in Warnings if exceeded).
+8. JHS Constraints (Grades 7-10): Sections cannot meet the same subject twice in one day. The Homeroom Adviser cannot be booked during the section's other classes.
+9. SHS Constraints (Grades 11-12): Sections can meet the same subject twice in one day, but NOT consecutively (no back-to-back blocks). Homeroom is strictly at 3:00 PM (Resolve any ARAL vs Homeroom 3:00 PM collisions logically, e.g., ARAL at 3:00 PM on other days, Homeroom on Monday).
+10. Unassigned Subjects: Distribute them to teachers with low loads based on specialization, flag with "🟢 Distributed Sub" in Warnings.
+11. If a teacher is overloaded, fallback to "Unavailable Teacher" and suggest free teachers in "Suggested Teachers".
+12. For Monday, Tuesday, Wednesday, Thursday, Friday, output boolean true or false.
+13. Time In and Time Out should be formatted as "h:mm AM/PM" (e.g., "7:30 AM").
+14. Action is always "—".
+
+Return ONLY a JSON object with a single root key "schedule" containing an array of objects. Each object must have keys matching the 13 columns exactly (case-sensitive).
+`;
+
+  const apiPayload = {
+    "contents": [{
+      "parts": [{ "text": prompt }]
+    }],
+    "generationConfig": {
+        "responseMimeType": "application/json",
+        "responseSchema": {
+            "type": "OBJECT",
+            "properties": {
+                "schedule": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "Section": { "type": "STRING" },
+                            "Subject": { "type": "STRING" },
+                            "Teacher": { "type": "STRING" },
+                            "Monday": { "type": "BOOLEAN" },
+                            "Tuesday": { "type": "BOOLEAN" },
+                            "Wednesday": { "type": "BOOLEAN" },
+                            "Thursday": { "type": "BOOLEAN" },
+                            "Friday": { "type": "BOOLEAN" },
+                            "Time In": { "type": "STRING" },
+                            "Time Out": { "type": "STRING" },
+                            "Action": { "type": "STRING" },
+                            "Warnings": { "type": "STRING" },
+                            "Suggested Teachers": { "type": "STRING" }
+                        },
+                        "required": ["Section", "Subject", "Teacher", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Time In", "Time Out", "Action", "Warnings", "Suggested Teachers"]
+                    }
+                }
+            }
+        }
+    }
+  };
+
+  const options = {
+    'method': 'post',
+    'contentType': 'application/json',
+    'payload': JSON.stringify(apiPayload),
+    'muteHttpExceptions': true
+  };
+
+  try {
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + apiKey;
+    const response = UrlFetchApp.fetch(url, options);
+    const json = JSON.parse(response.getContentText());
+
+    if (json.candidates && json.candidates.length > 0) {
+      let aiResponseText = json.candidates[0].content.parts[0].text;
+      let scheduleData = JSON.parse(aiResponseText).schedule;
+
+      if (scheduleData && scheduleData.length > 0) {
+          writeScheduleToSheet(ss, term, scheduleData);
+          ss.toast(`Successfully generated ${term} schedule using Gemini.`, '✅ Success', 5);
+      } else {
+          ss.toast(`Gemini returned empty schedule for ${term}.`, '⚠️ Warning', 5);
       }
-      if (!cBooked[sec]) cBooked[sec] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
+    } else {
+      ss.toast('Error parsing Gemini response: ' + response.getContentText(), '⚠️ API Error', 10);
+    }
+  } catch (e) {
+    ss.toast('API Request Failed: ' + e.toString(), '⚠️ Error', 10);
+  }
+}
 
-      if (!sectionDemands[sec]) sectionDemands[sec] = [];
+function writeScheduleToSheet(ss, term, scheduleData) {
+  const ts = ss.getSheetByName(term);
+  if (!ts) return;
 
-      // Determine Duration Logic
-      const isPhilGov = subj.toLowerCase().includes('phil gov') || subj.toLowerCase().includes('philippine politics');
-      const gradeMatch = sec.match(/\b(11|12|7|8|9|10)\b/);
-      const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
+  const outputRows = scheduleData.map(row => [
+    row["Section"], row["Subject"], row["Teacher"],
+    row["Monday"], row["Tuesday"], row["Wednesday"], row["Thursday"], row["Friday"],
+    row["Time In"], row["Time Out"], row["Action"], row["Warnings"], row["Suggested Teachers"]
+  ]);
 
-      const isHomeroom = subj.toLowerCase().includes('homeroom');
-      let durationMins = 60; // Minimum 1 hour unless Homeroom
-      if (isPhilGov) durationMins = 90;
-      else if (hrs % 1 === 0.5 && !isHomeroom) durationMins = 90; // Fractional weekly hours end in .5 -> 90 mins
-
-      if (isHomeroom && hrs === 0.5) durationMins = 30; // Homeroom exception
-
-      const isAral = subj.match(/\bARAL\b/i) && !subj.toLowerCase().includes('panlipunan');
-      if (isAral) durationMins = 60; // ARAL exactly 1 hour
-
-      sectionDemands[sec].push({
-         subject: subj,
-         teacher: teacher,
-         hoursLeft: hrs,
-         originalHours: hrs,
-         durationMins: durationMins,
-         isAral: isAral,
-         isHomeroom: isHomeroom,
-         grade: grade,
-         slotsAcquired: []
-      });
-    });
-
-    const sectionKeys = Object.keys(sectionDemands);
-    if (isReshuffle) sectionKeys.sort(() => Math.random() - 0.5);
-
-    // DISTRIBUTE UNASSIGNED SUBJECTS (Cross-Specialization Load Balancing)
-    let teacherWeeklyHours = {};
-    teachers.forEach(t => { if (t[1]) teacherWeeklyHours[t[1]] = 0; });
-
-    // First pass: Calculate pre-assigned hours
-    sectionKeys.forEach(sec => {
-        sectionDemands[sec].forEach(d => {
-            if (d.teacher !== '⚠️ Unassigned' && d.teacher !== 'Unavailable Teacher') {
-                if (teacherWeeklyHours[d.teacher] !== undefined) {
-                    teacherWeeklyHours[d.teacher] += d.originalHours;
-                }
-            }
-        });
-    });
-
-    // Second pass: Distribute unassigned
-    sectionKeys.forEach(sec => {
-        sectionDemands[sec].forEach(d => {
-            if (d.teacher === '⚠️ Unassigned') {
-                let bestT = null;
-                let lowestScore = Infinity;
-
-                let candidateTeachers = teachers.map(t => t[1]).filter(t => t !== 'Unavailable Teacher' && t !== '⚠️ Unassigned');
-                candidateTeachers.sort(() => Math.random() - 0.5);
-
-                candidateTeachers.forEach(tName => {
-                    let hrs = teacherWeeklyHours[tName] || 0;
-
-                    let isSpecMatch = false;
-                    let tObj = teachers.find(t => t[1] === tName);
-                    if (tObj && tObj[2]) {
-                        let spec = tObj[2].toString().toLowerCase();
-                        let subjLower = d.subject.toLowerCase();
-                        if (subjLower.includes(spec) || spec.includes(subjLower)) isSpecMatch = true;
-                    }
-
-                    // Score = current hours + penalty for non-specialist
-                    let score = hrs;
-                    if (!isSpecMatch) score += 5;
-
-                    if (score < lowestScore) {
-                        lowestScore = score;
-                        bestT = tName;
-                    }
-                });
-
-                if (bestT) {
-                    d.teacher = bestT;
-                    d.isSub = true; // flag as distributed substitute
-                    teacherWeeklyHours[bestT] += d.originalHours;
-
-                    if (!tBooked[bestT]) {
-                        tBooked[bestT] = { 1:[], 2:[], 3:[], 4:[], 5:[], sectionsMet: { 1:new Set(), 2:new Set(), 3:new Set(), 4:new Set(), 5:new Set() } };
-                        tBookedMins[bestT] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
-                        tBookedSubjects[bestT] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
-                    }
-                }
-            }
-        });
-    });
-
-    // TIMELINE-FIRST SCHEDULING (Dense Packing)
-    // We iterate over every Section, then Day, then Time. We strictly map gaps.
-
-    // Sort sections so reshuffle affects evaluation order
-
-    sectionKeys.forEach(section => {
-       const demands = sectionDemands[section];
-       const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
-       const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
-
-       // Pre-map Homeroom strictly
-       demands.forEach(d => {
-         if (d.isHomeroom && d.hoursLeft > 0) {
-            const day = 1; // Monday
-            let sStart = 450; // 7:30 AM
-            if (grade >= 11) sStart = 900; // 3:00 PM
-            const sEnd = sStart + 60;
-
-            cBooked[section][day].push({s: sStart, e: sEnd, subject: d.subject});
-            if (tBooked[d.teacher]) {
-               tBooked[d.teacher][day].push({s: sStart, e: sEnd});
-               tBookedMins[d.teacher][day] += 60;
-               tBooked[d.teacher].sectionsMet[day].add(section);
-            }
-            d.slotsAcquired.push({ day, in: formatMinsToTime(sStart), out: formatMinsToTime(sEnd), s: sStart, e: sEnd, assignedT: d.teacher });
-            d.hoursLeft -= 1;
-         }
-       });
-
-       let days = [1,2,3,4,5];
-       if (isReshuffle) days.sort(() => Math.random() - 0.5);
-
-       days.forEach(day => {
-          let time = 450; // Start at 7:30 AM
-
-          while (time < CFG.SCHOOL_END) { // Until 4:30 PM
-             // Skip pre-booked slots (like homeroom or manually inserted things)
-             const existingBlock = cBooked[section][day].find(b => time >= b.s && time < b.e);
-             if (existingBlock) {
-                 time = existingBlock.e;
-                 continue;
-             }
-
-             // Handle Recess (9:30 AM - 9:45 AM = 570-585)
-             if (time === 570) { time = 585; continue; }
-             // Handle Lunch (11:45 AM - 1:00 PM = 705-780)
-             if (time === 705) { time = 780; continue; }
-
-             // Find the best subject to fit in this time slot to guarantee dense packing
-             // We want to avoid skipping. If no subject perfectly fits, we MUST map an "Unavailable Teacher"
-             // to the best matching subject to maintain dense packing.
-
-             let validCandidates = demands.filter(d => d.hoursLeft > 0);
-             if (validCandidates.length === 0) break; // Finished schedule for section
-
-             // Filter by Hard Constraints
-             let bestSubj = null;
-             let bestScore = -Infinity;
-             let forceUnavailable = false;
-
-             validCandidates.forEach(d => {
-                let score = 100;
-                let tBlocked = false;
-                let sBlocked = false; // Section blocked by logical constraint (not time conflict)
-
-                // 1. Durations & Boundaries
-                let blockDur = d.durationMins;
-                if (d.hoursLeft * 60 < blockDur) {
-                    blockDur = d.hoursLeft * 60; // Truncate last block
-                }
-                // Minimum 1 hour rule unless Homeroom
-                if (!d.isHomeroom && blockDur < 60) blockDur = 60;
-                const endTime = time + blockDur;
-
-                // Crosses Recess or Lunch boundary? Invalid.
-                if (time < 570 && endTime > 570) sBlocked = true;
-                if (time < 705 && endTime > 705) sBlocked = true;
-                if (endTime > CFG.SCHOOL_END) sBlocked = true;
-
-                // 2. ARAL Placement (Must be exactly 3:00 PM - 4:00 PM)
-                if (d.isAral && time !== 900) sBlocked = true;
-                if (!d.isAral && time === 900) {
-                   // If another subject tries to take 3-4 PM, check if ARAL still needs it.
-                   const aralNeeds = demands.some(a => a.isAral && a.hoursLeft > 0);
-                   if (aralNeeds) score -= 1000; // Leave 3PM open for ARAL
-                }
-
-                // 3. G7-10 Meeting Frequency
-                const alreadyMetToday = cBooked[section][day].some(b => b.subject === d.subject);
-                if (grade <= 10 && alreadyMetToday) sBlocked = true;
-
-                // 4. G11-12 Consecutive Check
-                if (grade >= 11 && alreadyMetToday) {
-                   // Allowed to meet 2x, but NOT consecutively.
-                   const prevBlock = cBooked[section][day].find(b => b.subject === d.subject);
-                   if (prevBlock && (prevBlock.e === time || prevBlock.s === endTime)) {
-                       sBlocked = true; // Back to back
-                   }
-                }
-
-                if (sBlocked) return; // Cannot evaluate this subject for this slot
-
-                // Evaluate Teacher Constraints
-                const t = d.teacher;
-                if (t === '⚠️ Unassigned' || t === 'Unavailable Teacher') tBlocked = true;
-                else if (tBooked[t]) {
-                   // Time conflict
-                   if (tBooked[t][day].some(b => time < b.e && endTime > b.s)) tBlocked = true;
-
-                   // G7-10 Advisory Frequency for Teacher (Fix: Check if this teacher is the section's homeroom adviser)
-                   // The homeroom teacher for a section is mapped early. Let's determine if 't' is the homeroom teacher.
-                   const isAdviser = demands.some(x => x.isHomeroom && x.teacher === t);
-                   if (grade <= 10 && isAdviser && tBooked[t].sectionsMet[day].has(section)) tBlocked = true;
-
-                   // 6-Hour Hard Limit
-                   if (tBookedMins[t][day] + blockDur > CFG.DAILY_HARD_HOURS * 60) tBlocked = true;
-
-                   // Soft Constraints (Heuristics) if teacher is free
-                   if (!tBlocked) {
-                       // Prefer <= 4.5 hours (4.5h config)
-                       if (tBookedMins[t][day] + blockDur > CFG.DAILY_PREFERRED_HOURS * 60) score -= 150;
-
-                       // Teacher Prep Time: Penalize back-to-back
-                       const hasBackToBack = tBooked[t][day].some(b => b.e === time || b.s === endTime);
-                       if (hasBackToBack) score -= 20;
-
-                       // Perfect Block: Was it scheduled at this time on previous days?
-                       let sameTimeCount = 0;
-                       d.slotsAcquired.forEach(sa => {
-                          if (sa.s === time) sameTimeCount++;
-                       });
-                       score += sameTimeCount * 15;
-                   }
-                }
-
-                if (tBlocked) score -= 1000; // FIX: Heavily penalize blocked teachers so they never win against valid soft-penalties
-
-                // Sort weighting
-                score += d.hoursLeft * 2; // Prioritize heavier subjects
-
-                if (score > bestScore) {
-                   bestScore = score;
-                   bestSubj = d;
-                   forceUnavailable = tBlocked;
-                }
-             });
-
-             if (bestSubj) {
-                // Book it!
-                const bDur = Math.min(bestSubj.durationMins, bestSubj.hoursLeft * 60);
-                const eTime = time + bDur;
-
-                const finalTeacher = forceUnavailable ? 'Unavailable Teacher' : bestSubj.teacher;
-
-                cBooked[section][day].push({s: time, e: eTime, subject: bestSubj.subject});
-
-                if (finalTeacher !== 'Unavailable Teacher' && tBooked[finalTeacher]) {
-                    tBooked[finalTeacher][day].push({s: time, e: eTime});
-                    tBookedMins[finalTeacher][day] += bDur;
-                    tBooked[finalTeacher].sectionsMet[day].add(section);
-                }
-
-                bestSubj.slotsAcquired.push({
-                   day: day, in: formatMinsToTime(time), out: formatMinsToTime(eTime),
-                   s: time, e: eTime, assignedT: finalTeacher
-                });
-
-                bestSubj.hoursLeft -= (bDur / 60);
-                time = eTime; // Advance time
-             } else {
-                // No subject could legally fit here (e.g. ARAL constraints, etc.)
-                // To maintain dense packing, we are forced to skip the time slot. This is a severe bottleneck.
-                time += 30; // Advance time to try next slot
-             }
-          }
-       });
-    });
-
-    // Process output rows
-    sectionKeys.forEach(section => {
-       const demands = sectionDemands[section];
-       demands.forEach(d => {
-          if (d.hoursLeft > 0) {
-            unmappedLog.push(`[${term}] ${d.subject} (${section}) — ${d.hoursLeft}h unmapped. No physical slots left in week.`);
-          }
-
-          const grouped = {};
-          d.slotsAcquired.forEach(sa => {
-            const key = sa.in + '|' + sa.out + '|' + sa.assignedT;
-            if (!grouped[key]) grouped[key] = { m:false, t:false, w:false, th:false, f:false, in: sa.in, out: sa.out, finalTeacher: sa.assignedT };
-            if (sa.day === 1) grouped[key].m = true;
-            if (sa.day === 2) grouped[key].t = true;
-            if (sa.day === 3) grouped[key].w = true;
-            if (sa.day === 4) grouped[key].th = true;
-            if (sa.day === 5) grouped[key].f = true;
-          });
-
-          // Teacher Suggestions Based on Major
-          let suggestions = [];
-          const subjLower = d.subject.toLowerCase();
-          teachers.forEach(t => {
-            const spec = t[2].toString().toLowerCase();
-            if (spec && (subjLower.includes(spec) || spec.includes(subjLower))) {
-              suggestions.push(t[1]);
-            }
-          });
-          if (suggestions.length === 0) {
-            teachers.forEach(t => {
-              const spec = t[2].toString().toLowerCase();
-              const words = subjLower.split(' ').filter(w => w.length > 3);
-              if (words.some(w => spec.includes(w))) suggestions.push(t[1]);
-            });
-          }
-          const suggStr = suggestions.length > 0 ? suggestions.slice(0, 3).join(', ') : 'Any Teacher';
-
-          Object.values(grouped).forEach(g => {
-            let refinedSugg = suggStr;
-            let warn = '';
-
-            if (g.finalTeacher === 'Unavailable Teacher') {
-                warn = '🔴 Teacher Conflict';
-                // Find strictly free teachers
-                const startMins = parseTime(g.in);
-                const endMins = parseTime(g.out);
-                const activeDays = [];
-                if (g.m) activeDays.push(1); if (g.t) activeDays.push(2); if (g.w) activeDays.push(3); if (g.th) activeDays.push(4); if (g.f) activeDays.push(5);
-
-                let trulyFree = [];
-                suggestions.forEach(tName => {
-                   let isBlocked = false;
-                   if (!tBooked[tName]) return;
-                   activeDays.forEach(day => {
-                      if (tBooked[tName][day].some(b => startMins < b.e && endMins > b.s)) isBlocked = true;
-                      // Enforce 6h limit for suggestion
-                      if (tBookedMins[tName][day] + (endMins - startMins) > CFG.DAILY_HARD_HOURS * 60) isBlocked = true;
-                   });
-                   if (!isBlocked) trulyFree.push(tName);
-                });
-                if (trulyFree.length > 0) refinedSugg = '★ ' + trulyFree.slice(0, 3).join(', ');
-            } else {
-                // Check if they exceeded 4.5h on any of these days
-                const dayMap = {m:1, t:2, w:3, th:4, f:5};
-                let softLimitHit = false;
-                ['m','t','w','th','f'].forEach(dayKey => {
-                    if (g[dayKey]) {
-                        let dIdx = dayMap[dayKey];
-                        if (tBookedMins[g.finalTeacher] && tBookedMins[g.finalTeacher][dIdx] > CFG.DAILY_PREFERRED_HOURS * 60) {
-                            softLimitHit = true;
-                        }
-                    }
-                });
-
-                if (softLimitHit) {
-                    warn = warn ? warn + ', 🟠 >4.5h Soft Limit' : '🟠 >4.5h Soft Limit';
-                }
-
-                if (d.isSub) {
-                    warn = warn ? warn + ', 🟢 Distributed Sub' : '🟢 Distributed Sub';
-                }
-            }
-
-            outputRows.push([section, d.subject, g.finalTeacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out, '—', warn, refinedSugg]);
-          });
-       });
-    });
-
-    const ts = ss.getSheetByName(term);
-    if (ts && outputRows.length > 0) {
+  if (outputRows.length > 0) {
       ts.getRange(3, 1, outputRows.length, 13).setValues(outputRows);
       ts.getRange(3, 1, outputRows.length, 13).setVerticalAlignment('middle');
       ts.getRange(3, 9, outputRows.length, 2).setHorizontalAlignment('center');
       ts.getRange(3, 12, outputRows.length, 1).setFontColor(C.warn).setFontStyle('italic');
-    }
-  });
-
-  if (unmappedLog.length > 0) {
-    const ui = SpreadsheetApp.getUi();
-    ui.alert(
-      '⚠️ Timetable Adjustments Required',
-      'Some sections have physical unmapped hours due to extreme bottlenecks:\n\n' + unmappedLog.join('\n\n') + '\n\nPlease review the Term tabs.',
-      ui.ButtonSet.OK
-    );
-
-    const rep = ss.getSheetByName(CFG.REPORT);
-    if (rep) {
-        let lr = Math.max(3, rep.getLastRow() + 1);
-        let out = [];
-        unmappedLog.forEach(log => {
-            // log format: [Term 1] Science (Grade 7) — 1h unmapped. No physical slots left in week.
-            const match = log.match(/\[(.*?)\] (.*?) \((.*?)\) — (.*?h) unmapped/);
-            if (match) {
-                out.push([match[1], '🔴 Unmapped Hours', 'ALL', match[3], 'N/A', 'N/A', match[2], `Needs ${match[4]}`, '—']);
-            }
-        });
-        if (out.length > 0) {
-            rep.getRange(lr, 1, out.length, 9).setValues(out).setBackground(C.errorBg).setFontColor(C.error);
-        }
-    }
-  } else {
-    ss.toast('Schedules are completely mapped out and optimized!', '✅ All Set', 6);
   }
-
-  if (typeof updateSubjectLoadingHours === 'function') updateSubjectLoadingHours();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1285,6 +997,28 @@ function buildPhase4Dashboard() {
   ss.toast('Dual Teacher Dashboard fully constructed.', '✅ Phase 4 Complete', 5);
 }
 
+
+function buildAIFeedbackWorkspace() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const wsName = 'AI Feedback Workspace';
+  let ws = ss.getSheetByName(wsName) || ss.insertSheet(wsName, 6);
+  ws.clear();
+
+  ws.getRange('A1:B1').setValues([['Proposed Scheduling Rule', 'AI Evaluation']]).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  ws.setRowHeight(1, 40);
+
+  ws.setColumnWidth(1, 500);
+  ws.setColumnWidth(2, 500);
+
+  ws.getRange('A2:B2').setWrap(true).setVerticalAlignment('top');
+  ws.setRowHeight(2, 200);
+
+  ws.getRange('A2').setBackground(C.tealLight).setBorder(true, true, true, true, null, null);
+  ws.getRange('B2').setBackground(C.navyLight).setBorder(true, true, true, true, null, null);
+
+  ss.toast('AI Feedback Workspace created.', '✅ Phase 6 Complete', 4);
+}
+
 function buildPhase5ConflictReport() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let rep = ss.getSheetByName(CFG.REPORT) || ss.insertSheet(CFG.REPORT, 2);
@@ -1709,5 +1443,56 @@ function buildPDFTemplateSheetAndExport(mode, targetName, rows) {
   } catch (err) {
     if (ts) ss.deleteSheet(ts);
     return 'Error creating PDF: ' + err.toString();
+  }
+}
+
+function validateProvisionWithAI() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ws = ss.getSheetByName('AI Feedback Workspace');
+  if (!ws) {
+    return ss.toast('AI Feedback Workspace not found. Build it from the Faculty Tools menu.', '⚠️ Error');
+  }
+
+  const rule = ws.getRange('A2').getValue();
+  if (!rule) {
+    return ss.toast('Please enter a proposed scheduling rule in A2.', '⚠️ Empty');
+  }
+
+  ws.getRange('B2').setValue('⏳ Thinking...').setFontColor(C.muted);
+
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) {
+    ws.getRange('B2').setValue('Error: GEMINI_API_KEY missing in Script Properties.');
+    return;
+  }
+
+  const prompt = `Analyze the following proposed scheduling rule for a school faculty loading system:\n\n"${rule}"\n\nEvaluate this rule against standard school scheduling logic. You must reply strictly with either the word EXECUTABLE or IMPOSSIBLE, followed by a colon and exactly two sentences explaining potential bottlenecks or implications.`;
+
+  const payload = {
+    "contents": [{
+      "parts": [{ "text": prompt }]
+    }]
+  };
+
+  const options = {
+    'method': 'post',
+    'contentType': 'application/json',
+    'payload': JSON.stringify(payload),
+    'muteHttpExceptions': true
+  };
+
+  try {
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + apiKey;
+    const response = UrlFetchApp.fetch(url, options);
+    const json = JSON.parse(response.getContentText());
+
+    if (json.candidates && json.candidates.length > 0) {
+      let aiText = json.candidates[0].content.parts[0].text;
+      ws.getRange('B2').setValue(aiText.trim()).setFontColor(C.body);
+    } else {
+      ws.getRange('B2').setValue('Error parsing AI response: ' + response.getContentText());
+    }
+  } catch (e) {
+    ws.getRange('B2').setValue('API Error: ' + e.toString());
   }
 }
