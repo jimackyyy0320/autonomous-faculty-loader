@@ -55,13 +55,8 @@ function onOpen() {
     .addItem('3️⃣ Build: Phase 3 Term Tabs', 'buildPhase3TermTabs')
     .addItem('4️⃣ Build: Phase 4 Teacher Dash', 'buildPhase4Dashboard')
     .addItem('5️⃣ Build: Phase 5 Conflict Report', 'buildPhase5ConflictReport')
-    .addItem('6️⃣ Build: AI Feedback Workspace', 'buildAIFeedbackWorkspace')
-    .addItem('7️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer')
-    .addSeparator()
-    .addItem('🚀 RUN LOCAL AI AUTO-SCHEDULER', 'runAutoScheduler')
-    .addItem('🤖 VALIDATE LOCAL PROVISION', 'validateProvisionLocal')
-    .addItem('🔄 RECALCULATE SCHEDULE', 'runRecalculateSchedule')
-    .addItem('🔍 RUN CONFLICT CHECKER', 'runConflictChecker')
+    .addItem('6️⃣ Build: All Sections Visualizer', 'buildAllSectionsVisualizer')
+    .addItem('7️⃣ Build: All Teachers Visualizer', 'buildAllTeachersVisualizer')
     .addSeparator()
     .addItem('🖨️ Generate Schedule PDF', 'generateScheduleUI')
     .addToUi();
@@ -74,10 +69,18 @@ function onEdit(e) {
   const row = e.range.getRow();
   const col = e.range.getColumn();
 
-  // 4.5 Interactive Learning: Real-time conflict feedback on manual edits
+  // 4.5 Interactive Learning & Dynamic Background Synchronization
   if (CFG.TERMS.includes(sheetName) && row > 2 && (col === 3 || col >= 4 && col <= 10)) {
+    // Lightweight row-specific dynamic evaluation
     checkRowConflicts(e.range.getSheet(), row);
     updateSubjectLoadingHours();
+
+    // Run the master conflict checker silently
+    runConflictChecker(true);
+
+    // Dynamically rebuild visualizers silently in the background
+    buildAllSectionsVisualizer(true);
+    buildAllTeachersVisualizer(true);
   }
 
   // 4.6 Subject Loading Live Updates
@@ -119,454 +122,16 @@ function onEdit(e) {
 //  SECTION 3: AUTO-SCHEDULER (The Super-Advanced Brain)
 // ══════════════════════════════════════════════════════════════
 
-function runRecalculateSchedule() {
-  runAutoScheduler(true);
-}
-
-function runAutoScheduler(isReshuffle = false) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
-  const enrollSheet = ss.getSheetByName(CFG.TEACHER_ENROLL);
-
-  if (!subSheet || !enrollSheet) {
-    return ss.toast('Please ensure your Data tabs are set up first.', '👋 Note', 5);
-  }
-
-  ss.toast('Running Strict CSP Solver Algorithm...', '🧠 Computing', 4);
-
-  const getSafeData = (sheet, numCols) => {
-    const lr = sheet.getLastRow();
-    return lr < 3 ? [] : sheet.getRange(3, 1, lr - 2, numCols).getValues();
-  };
-
-  const demands = getSafeData(subSheet, 5).filter(r => r[0] && r[1] && r[2]);
-  const teachers = getSafeData(enrollSheet, 3).filter(r => r[1]);
-
-  let unmappedLog = [];
-  const props = PropertiesService.getDocumentProperties();
-
-  CFG.TERMS.forEach(term => {
-    const termDemands = demands.filter(d => d[0] === term);
-    if (!termDemands.length) return;
-
-    const tBooked = {};
-    const tBookedMins = {};
-    const tBookedSubjects = {};
-    const cBooked = {};
-    const outputRows = [];
-
-    const sectionDemands = {};
-    termDemands.forEach(d => {
-      const sec = d[1].toString().trim();
-      const subj = d[2].toString().trim();
-      const hrs = parseFloat(d[3]) || 0;
-
-      const learnedTeacher = props.getProperty('LEARNED_' + subj + '|' + sec);
-      let teacher = learnedTeacher || (d[4] ? d[4].toString().trim() : '') || '⚠️ Unassigned';
-
-      if (!tBooked[teacher] && teacher !== 'Unavailable Teacher' && teacher !== '⚠️ Unassigned') {
-          tBooked[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[], sectionsMet: { 1:new Set(), 2:new Set(), 3:new Set(), 4:new Set(), 5:new Set() } };
-          tBookedMins[teacher] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
-          tBookedSubjects[teacher] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
-      }
-      if (!cBooked[sec]) cBooked[sec] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
-
-      if (!sectionDemands[sec]) sectionDemands[sec] = [];
-
-      const isPhilGov = subj.toLowerCase().includes('phil gov') || subj.toLowerCase().includes('philippine politics');
-      const gradeMatch = sec.match(/\b(11|12|7|8|9|10)\b/);
-      const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
-
-      const isHomeroom = subj.toLowerCase().includes('homeroom');
-      let durationMins = 60; // Minimum 1 hour unless Homeroom
-      if (isPhilGov) durationMins = 90;
-
-      if (isHomeroom && hrs === 0.5) durationMins = 30; // Homeroom exception
-
-      const isAral = subj.match(/\bARAL\b/i) && !subj.toLowerCase().includes('panlipunan');
-      if (isAral) durationMins = 60; // ARAL exactly 1 hour
-
-      sectionDemands[sec].push({
-         subject: subj,
-         teacher: teacher,
-         hoursLeft: hrs,
-         originalHours: hrs,
-         durationMins: durationMins,
-         isAral: isAral,
-         isHomeroom: isHomeroom,
-         isPhilGov: isPhilGov,
-         grade: grade,
-         slotsAcquired: []
-      });
-    });
-
-    const sectionKeys = Object.keys(sectionDemands);
-    if (isReshuffle) sectionKeys.sort(() => Math.random() - 0.5);
-
-    // DISTRIBUTE UNASSIGNED SUBJECTS (Cross-Specialization Adaptive Load Balancing)
-    let teacherWeeklyHours = {};
-    teachers.forEach(t => { if (t[1]) teacherWeeklyHours[t[1]] = 0; });
-
-    sectionKeys.forEach(sec => {
-        sectionDemands[sec].forEach(d => {
-            if (d.teacher !== '⚠️ Unassigned' && d.teacher !== 'Unavailable Teacher') {
-                if (teacherWeeklyHours[d.teacher] !== undefined) {
-                    teacherWeeklyHours[d.teacher] += d.originalHours;
-                }
-            }
-        });
-    });
-
-    sectionKeys.forEach(sec => {
-        sectionDemands[sec].forEach(d => {
-            if (d.teacher === '⚠️ Unassigned') {
-                let bestT = null;
-                let lowestScore = Infinity;
-
-                let candidateTeachers = teachers.map(t => t[1]).filter(t => t !== 'Unavailable Teacher' && t !== '⚠️ Unassigned');
-                candidateTeachers.sort(() => Math.random() - 0.5);
-
-                candidateTeachers.forEach(tName => {
-                    let hrs = teacherWeeklyHours[tName] || 0;
-
-                    let isSpecMatch = false;
-                    let tObj = teachers.find(t => t[1] === tName);
-                    if (tObj && tObj[2]) {
-                        let spec = tObj[2].toString().toLowerCase();
-                        let subjLower = d.subject.toLowerCase();
-                        if (subjLower.includes(spec) || spec.includes(subjLower)) isSpecMatch = true;
-                    }
-
-                    let score = hrs;
-                    if (!isSpecMatch) score += 5;
-
-                    if (score < lowestScore) {
-                        lowestScore = score;
-                        bestT = tName;
-                    }
-                });
-
-                if (bestT) {
-                    d.teacher = bestT;
-                    d.isSub = true;
-                    teacherWeeklyHours[bestT] += d.originalHours;
-
-                    if (!tBooked[bestT]) {
-                        tBooked[bestT] = { 1:[], 2:[], 3:[], 4:[], 5:[], sectionsMet: { 1:new Set(), 2:new Set(), 3:new Set(), 4:new Set(), 5:new Set() } };
-                        tBookedMins[bestT] = { 1:0, 2:0, 3:0, 4:0, 5:0 };
-                        tBookedSubjects[bestT] = { 1:[], 2:[], 3:[], 4:[], 5:[] };
-                    }
-                }
-            }
-        });
-    });
-
-    // CSP TIMELINE SOLVER WITH BACKTRACKING LOGIC
-    sectionKeys.forEach(section => {
-       const demands = sectionDemands[section];
-       const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
-       const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
-
-       // 1. Pre-map rigid constraints (Homeroom & ARAL)
-       demands.forEach(d => {
-         // ARAL Pre-Map (3:00 PM)
-         if (d.isAral && d.hoursLeft > 0) {
-             let aralDay = 1;
-             // If SHS, Homeroom takes Monday 3:00 PM, so ARAL moves to Tuesday
-             if (grade >= 11) aralDay = 2;
-
-             let sStart = 900; // 3:00 PM
-             let sEnd = 960; // 4:00 PM
-
-             cBooked[section][aralDay].push({s: sStart, e: sEnd, subject: d.subject});
-             if (tBooked[d.teacher]) {
-                tBooked[d.teacher][aralDay].push({s: sStart, e: sEnd});
-                tBookedMins[d.teacher][aralDay] += 60;
-                tBooked[d.teacher].sectionsMet[aralDay].add(section);
-             }
-             d.slotsAcquired.push({ day: aralDay, in: formatMinsToTime(sStart), out: formatMinsToTime(sEnd), s: sStart, e: sEnd, assignedT: d.teacher });
-             d.hoursLeft -= 1;
-         }
-
-         // Homeroom Pre-Map
-         if (d.isHomeroom && d.hoursLeft > 0) {
-            const day = 1; // Monday
-            let sStart = 450; // 7:30 AM
-            if (grade >= 11) sStart = 900; // 3:00 PM
-            const duration = (d.hoursLeft >= 1) ? 60 : (d.hoursLeft * 60);
-            const sEnd = sStart + duration;
-
-            cBooked[section][day].push({s: sStart, e: sEnd, subject: d.subject});
-            if (tBooked[d.teacher]) {
-               tBooked[d.teacher][day].push({s: sStart, e: sEnd});
-               tBookedMins[d.teacher][day] += duration;
-               tBooked[d.teacher].sectionsMet[day].add(section);
-            }
-            d.slotsAcquired.push({ day, in: formatMinsToTime(sStart), out: formatMinsToTime(sEnd), s: sStart, e: sEnd, assignedT: d.teacher });
-            d.hoursLeft -= (duration / 60);
-         }
-       });
-
-              let days = [1,2,3,4,5];
-       if (isReshuffle) days.sort(() => Math.random() - 0.5);
-
-       days.forEach(day => {
-
-          // Localized Recursive Backtracking CSP Solver per day
-          function solve(time) {
-             if (time >= CFG.SCHOOL_END) return true;
-
-             // Recess or Lunch boundary jump
-             if (time === 570) return solve(585);
-             if (time === 705) return solve(780);
-
-             // Skip if time slot is already pre-mapped (ARAL/Homeroom)
-             const existingBlock = cBooked[section][day].find(b => time >= b.s && time < b.e);
-             if (existingBlock) return solve(existingBlock.e);
-
-             let validCandidates = demands.filter(d => d.hoursLeft > 0);
-             if (validCandidates.length === 0) return true; // All demands met
-
-             // Sort candidates heuristically (Most Constrained Variable First)
-             validCandidates.sort((a, b) => b.hoursLeft - a.hoursLeft);
-
-             let slotFilled = false;
-
-             for (let i = 0; i < validCandidates.length; i++) {
-                let d = validCandidates[i];
-                let sBlocked = false;
-
-                let blockDur = d.durationMins;
-                if (!d.isPhilGov && !d.isHomeroom && d.hoursLeft % 1 === 0.5 && d.hoursLeft >= 1.5) blockDur = 90;
-                if (d.hoursLeft * 60 < blockDur) blockDur = d.hoursLeft * 60;
-                const endTime = time + blockDur;
-
-                // Look-Ahead Validation
-                if (time < 570 && endTime > 570) sBlocked = true;
-                if (time < 705 && endTime > 705) sBlocked = true;
-                if (endTime > CFG.SCHOOL_END) sBlocked = true;
-
-                // Collision with pre-mapped ARAL/Homeroom logic
-                if (cBooked[section][day].some(b => time < b.e && endTime > b.s)) sBlocked = true;
-
-                const alreadyMetToday = cBooked[section][day].some(b => b.subject === d.subject);
-                if (grade <= 10 && alreadyMetToday) sBlocked = true;
-
-                if (grade >= 11 && alreadyMetToday) {
-                   const prevBlock = cBooked[section][day].find(b => b.subject === d.subject);
-                   if (prevBlock && (prevBlock.e === time || prevBlock.s === endTime)) sBlocked = true;
-                }
-
-                if (sBlocked) continue;
-
-                // Teacher Constraints
-                const t = d.teacher;
-                let tBlocked = false;
-
-                if (t !== '⚠️ Unassigned' && t !== 'Unavailable Teacher' && tBooked[t]) {
-                   if (tBooked[t][day].some(b => time < b.e && endTime > b.s)) tBlocked = true;
-                   const isAdviser = demands.some(x => x.isHomeroom && x.teacher === t);
-                   if (grade <= 10 && isAdviser && tBooked[t].sectionsMet[day].has(section)) tBlocked = true;
-                   if (tBookedMins[t][day] + blockDur > CFG.DAILY_HARD_HOURS * 60) tBlocked = true;
-                }
-
-                // If teacher blocked, fallback to unavailable to maintain density.
-                const finalTeacher = (tBlocked || t === '⚠️ Unassigned') ? 'Unavailable Teacher' : t;
-
-                // --- DO (Apply State) ---
-                cBooked[section][day].push({s: time, e: endTime, subject: d.subject});
-                if (finalTeacher !== 'Unavailable Teacher' && tBooked[finalTeacher]) {
-                    tBooked[finalTeacher][day].push({s: time, e: endTime});
-                    tBookedMins[finalTeacher][day] += blockDur;
-                    tBooked[finalTeacher].sectionsMet[day].add(section);
-                }
-                d.slotsAcquired.push({ day: day, in: formatMinsToTime(time), out: formatMinsToTime(endTime), s: time, e: endTime, assignedT: finalTeacher });
-                d.hoursLeft -= (blockDur / 60);
-
-                // --- RECURSE ---
-                if (solve(endTime)) {
-                    slotFilled = true;
-                    break;
-                }
-
-                // --- UNDO (Backtrack State) ---
-                cBooked[section][day].pop();
-                if (finalTeacher !== 'Unavailable Teacher' && tBooked[finalTeacher]) {
-                    tBooked[finalTeacher][day].pop();
-                    tBookedMins[finalTeacher][day] -= blockDur;
-                    tBooked[finalTeacher].sectionsMet[day].delete(section); // Note: Simple delete may affect pre-mapped things, but acceptable for this scope
-                }
-                d.slotsAcquired.pop();
-                d.hoursLeft += (blockDur / 60);
-             }
-
-             // If no subject can fit this specific slot, advance time to force gap and try again (Base fallback to prevent infinite halt)
-             if (!slotFilled) return solve(time + 30);
-
-             return true;
-          }
-
-          solve(450); // Initialize backtracking from 7:30 AM
-       });
-    });
-
-    // Output Compilation
-    sectionKeys.forEach(section => {
-       const demands = sectionDemands[section];
-       demands.forEach(d => {
-          if (d.hoursLeft > 0) {
-            unmappedLog.push(`[${term}] ${d.subject} (${section}) — ${d.hoursLeft}h unmapped. Bottleneck detected.`);
-          }
-
-          const grouped = {};
-          d.slotsAcquired.forEach(sa => {
-            const key = sa.in + '|' + sa.out + '|' + sa.assignedT;
-            if (!grouped[key]) grouped[key] = { m:false, t:false, w:false, th:false, f:false, in: sa.in, out: sa.out, finalTeacher: sa.assignedT };
-            if (sa.day === 1) grouped[key].m = true;
-            if (sa.day === 2) grouped[key].t = true;
-            if (sa.day === 3) grouped[key].w = true;
-            if (sa.day === 4) grouped[key].th = true;
-            if (sa.day === 5) grouped[key].f = true;
-          });
-
-          let suggestions = [];
-          const subjLower = d.subject.toLowerCase();
-          teachers.forEach(t => {
-            const spec = t[2] ? t[2].toString().toLowerCase() : '';
-            if (spec && (subjLower.includes(spec) || spec.includes(subjLower))) {
-              suggestions.push(t[1]);
-            }
-          });
-          if (suggestions.length === 0) {
-            teachers.forEach(t => {
-              const spec = t[2] ? t[2].toString().toLowerCase() : '';
-              const words = subjLower.split(' ').filter(w => w.length > 3);
-              if (words.some(w => spec.includes(w))) suggestions.push(t[1]);
-            });
-          }
-          const suggStr = suggestions.length > 0 ? suggestions.slice(0, 3).join(', ') : 'Any Teacher';
-
-          Object.values(grouped).forEach(g => {
-            let refinedSugg = suggStr;
-            let warn = '';
-
-            if (g.finalTeacher === 'Unavailable Teacher') {
-                warn = '🔴 Teacher Conflict';
-                const startMins = parseTime(g.in);
-                const endMins = parseTime(g.out);
-                const activeDays = [];
-                if (g.m) activeDays.push(1); if (g.t) activeDays.push(2); if (g.w) activeDays.push(3); if (g.th) activeDays.push(4); if (g.f) activeDays.push(5);
-
-                let trulyFree = [];
-                suggestions.forEach(tName => {
-                   let isBlocked = false;
-                   if (!tBooked[tName]) return;
-                   activeDays.forEach(day => {
-                      if (tBooked[tName][day].some(b => startMins < b.e && endMins > b.s)) isBlocked = true;
-                      if (tBookedMins[tName][day] + (endMins - startMins) > CFG.DAILY_HARD_HOURS * 60) isBlocked = true;
-                   });
-                   if (!isBlocked) trulyFree.push(tName);
-                });
-                if (trulyFree.length > 0) refinedSugg = '★ ' + trulyFree.slice(0, 3).join(', ');
-            } else {
-                const dayMap = {m:1, t:2, w:3, th:4, f:5};
-                let softLimitHit = false;
-                ['m','t','w','th','f'].forEach(dayKey => {
-                    if (g[dayKey]) {
-                        let dIdx = dayMap[dayKey];
-                        if (tBookedMins[g.finalTeacher] && tBookedMins[g.finalTeacher][dIdx] > CFG.DAILY_PREFERRED_HOURS * 60) {
-                            softLimitHit = true;
-                        }
-                    }
-                });
-
-                if (softLimitHit) warn = warn ? warn + ', 🟠 >4.5h Soft Limit' : '🟠 >4.5h Soft Limit';
-                if (d.isSub) warn = warn ? warn + ', 🟢 Distributed Sub' : '🟢 Distributed Sub';
-            }
-
-            outputRows.push([section, d.subject, g.finalTeacher, g.m, g.t, g.w, g.th, g.f, g.in, g.out, '—', warn, refinedSugg]);
-          });
-       });
-    });
-
-    const ts = ss.getSheetByName(term);
-    if (ts) {
-      const lr = ts.getLastRow();
-      if (lr >= 3) {
-        ts.getRange(3, 1, lr - 2, 13).clearContent();
-        ts.getRange(3, 4, lr - 2, 5).insertCheckboxes();
-        const actionRule = SpreadsheetApp.newDataValidation().requireValueInList(['—', 'Fix Conflict'], true).build();
-        ts.getRange(3, 11, lr - 2, 1).setDataValidation(actionRule);
-      }
-      if (outputRows.length > 0) {
-        ts.getRange(3, 1, outputRows.length, 13).setValues(outputRows);
-        ts.getRange(3, 1, outputRows.length, 13).setVerticalAlignment('middle');
-        ts.getRange(3, 9, outputRows.length, 2).setHorizontalAlignment('center');
-        ts.getRange(3, 12, outputRows.length, 1).setFontColor(C.warn).setFontStyle('italic');
-      }
-    }
-  });
-
-  if (unmappedLog.length > 0) {
-    const ui = SpreadsheetApp.getUi();
-    ui.alert('⚠️ Adjustments Required', 'Some sections hit physical limits:\n\n' + unmappedLog.join('\n\n'), ui.ButtonSet.OK);
-
-    const rep = ss.getSheetByName(CFG.REPORT);
-    if (rep) {
-        let lr = Math.max(3, rep.getLastRow() + 1);
-        let out = [];
-        unmappedLog.forEach(log => {
-            const match = log.match(/\[(.*?)\] (.*?) \((.*?)\) — (.*?h) unmapped/);
-            if (match) out.push([match[1], '🔴 Unmapped Hours', 'ALL', match[3], 'N/A', 'N/A', match[2], `Needs ${match[4]}`, '—']);
-        });
-        if (out.length > 0) rep.getRange(lr, 1, out.length, 9).setValues(out).setBackground(C.errorBg).setFontColor(C.error);
-    }
-  } else {
-    ss.toast('Schedules are completely mapped out locally!', '✅ All Set', 6);
-  }
-
-  if (typeof updateSubjectLoadingHours === 'function') updateSubjectLoadingHours();
-}
-
-function validateProvisionLocal() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const ws = ss.getSheetByName('AI Feedback Workspace');
-  if (!ws) return ss.toast('AI Feedback Workspace not found.', '⚠️ Error');
-
-  const rule = ws.getRange('A2').getValue().toString().toLowerCase();
-  if (!rule) return ss.toast('Please enter a proposed rule.', '⚠️ Empty');
-
-  ws.getRange('B2').setValue('⏳ Processing Locally...').setFontColor(C.muted);
-
-  let evaluation = "EXECUTABLE: This rule can be processed by the local CSP engine without violating absolute time boundaries.";
-
-  // Local Regex Logic Checker
-  if (rule.includes("lunch") && (rule.includes("class") || rule.includes("schedule") || rule.includes("teach"))) {
-      evaluation = "IMPOSSIBLE: The system strictly locks 11:45 AM - 1:00 PM for Lunch. No classes can bleed into this physical boundary.";
-  }
-  if (rule.includes("recess") && (rule.includes("class") || rule.includes("schedule") || rule.includes("teach"))) {
-      evaluation = "IMPOSSIBLE: The system strictly locks 9:30 AM - 9:45 AM for Recess. No classes can bleed into this boundary.";
-  }
-  if (rule.match(/teacher.*(7|8|9|10).*hours/)) {
-      evaluation = "IMPOSSIBLE: The system has a hard-coded constraint (CFG.DAILY_HARD_HOURS) of 6 hours. This request forces a violation.";
-  }
-  if (rule.includes("aral") && !rule.includes("3:00") && !rule.includes("3 pm")) {
-       evaluation = "IMPOSSIBLE: The ARAL subject is physically hard-locked to the 3:00 PM slot by the constraints matrix.";
-  }
-
-  ws.getRange('B2').setValue(evaluation).setFontColor(C.body);
-}
-
 // ══════════════════════════════════════════════════════════════
 //  SECTION 4: CONFLICT CHECKER ENGINE & AUTO-FIXER
 // ══════════════════════════════════════════════════════════════
 
-function runConflictChecker() {
+function runConflictChecker(isMuted = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const rep = ss.getSheetByName(CFG.REPORT);
-  if (!rep) return ss.toast('Missing Report Tab. Run Phase 5 Builder first.', '⚠️ Error');
+  if (!rep) { if (!isMuted) ss.toast('Missing Report Tab. Run Phase 5 Builder first.', '⚠️ Error'); return; }
 
-  ss.toast('Scanning all Term schedules...', '🔍 Checking', 3);
+  if (!isMuted) ss.toast('Scanning all Term schedules...', '🔍 Checking', 3);
 
   const lastR = rep.getLastRow();
   if (lastR >= 3) {
@@ -608,7 +173,7 @@ function runConflictChecker() {
 
     if (c.hasSolution) {
       rep.getRange(sr, 8).setFontWeight('bold').setFontColor(C.ok);
-      rep.getRange(sr, 9).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['—', 'Implement'], true).build()).setValue('—').setBackground(C.warnBg).setHorizontalAlignment('center');
+      rep.getRange(sr, 9).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['—', 'Implement'], true).setAllowInvalid(true).build()).setValue('—').setBackground(C.warnBg).setHorizontalAlignment('center');
     } else {
       rep.getRange(sr, 8).setFontColor(C.muted);
       rep.getRange(sr, 9).setValue('Manual Only').setFontColor(C.muted).setHorizontalAlignment('center');
@@ -619,7 +184,7 @@ function runConflictChecker() {
   rep.getRange(3, 1, rows.length, 5).setHorizontalAlignment('center');
   rep.hideColumns(10);
 
-  ss.toast(`Scan complete. Found ${allConflicts.length} issues.`, '✅ Done', 5);
+  if (!isMuted) ss.toast(`Scan complete. Found ${allConflicts.length} issues.`, '✅ Done', 5);
 }
 
 function applySuggestedFix(e) {
@@ -795,19 +360,20 @@ function checkRowConflicts(sheet, rowNum) {
   const targetRow = data[rowNum - 3];
   if (!targetRow) return;
 
-  const section = targetRow[0];
-  const subject = targetRow[1];
-  const teacher = targetRow[2];
-  const tIn = parseTime(targetRow[8]);
-  const tOut = parseTime(targetRow[9]);
+  const section = targetRow[0].toString().trim();
+  const subject = targetRow[1].toString().trim();
+  const teacher = targetRow[2].toString().trim();
+  const tInStr = targetRow[8];
+  const tOutStr = targetRow[9];
+  const tIn = parseTime(tInStr);
+  const tOut = parseTime(tOutStr);
 
-  // AI Learning Module: Memorize manual overrides
   if (section && subject && teacher) {
     const props = PropertiesService.getDocumentProperties();
     props.setProperty('LEARNED_' + subject + '|' + section, teacher);
   }
 
-  if (!teacher || tIn >= tOut || teacher === 'Unavailable Teacher') {
+  if (!teacher || tIn >= tOut || teacher === 'Unavailable Teacher' || teacher === '⚠️ Unassigned') {
     sheet.getRange(rowNum, 12).setValue('');
     return;
   }
@@ -816,15 +382,42 @@ function checkRowConflicts(sheet, rowNum) {
   if (activeDays.length === 0) return;
 
   let overlaps = [];
+  let provisions = [];
   let dailyHrs = {3:0, 4:0, 5:0, 6:0, 7:0};
 
+  const isHomeroom = subject.toLowerCase().includes('homeroom');
+  const isPhilGov = subject.toLowerCase().includes('phil gov') || subject.toLowerCase().includes('philippine politics');
+  const isAral = subject.match(/\bARAL\b/i) && !subject.toLowerCase().includes('panlipunan');
+
+  const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
+  const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
+
+  const durMins = tOut - tIn;
+
+  // PROVISION: Physical Boundaries (Lunch and Recess)
+  if (tIn < 585 && tOut > 570) provisions.push('🔴 Bleeds into Recess (9:30-9:45)');
+  if (tIn < 780 && tOut > 705) provisions.push('🔴 Bleeds into Lunch (11:45-1:00)');
+
+  // PROVISION: Duration Rules
+  if (isHomeroom && durMins !== 30) provisions.push('🟠 Homeroom should be 30m');
+  if (isPhilGov && durMins !== 90) provisions.push('🟠 PhilGov should be 90m');
+  if (!isHomeroom && !isPhilGov && durMins < 60) provisions.push('🔴 Classes must be min 60m');
+
+  // PROVISION: Subject Placement Rules
+  if (isAral && tIn !== 900) provisions.push('🔴 ARAL must be at 3:00 PM');
+
+  if (isHomeroom) {
+      if (grade <= 10 && (tIn !== 450 || !targetRow[3])) provisions.push('🟠 JHS Homeroom should be Mon 7:30 AM');
+      if (grade >= 11 && tIn !== 900) provisions.push('🟠 SHS Homeroom should be 3:00 PM');
+  }
+
+  // Cross-referencing against the rest of the schedule
   data.forEach((r, idx) => {
     if (idx === rowNum - 3) return; // skip self
     const rStart = parseTime(r[8]);
     const rEnd = parseTime(r[9]);
     if (rStart >= rEnd) return;
 
-    // Check overlaps
     const sameTeacher = r[2] === teacher;
     const sameSection = r[0] === section && section !== '';
     const sameSubject = sameSection && r[1] === subject;
@@ -832,13 +425,13 @@ function checkRowConflicts(sheet, rowNum) {
     if (sameTeacher || sameSection) {
       activeDays.forEach(d => {
         if (r[d] === true) {
+          // Overlaps
           if (tIn < rEnd && tOut > rStart) {
             overlaps.push(sameTeacher ? '🔴 Teacher Overlap' : '🔴 Section Overlap');
           }
-          // Back-to-back constraint for same subject (G11-12) or any (G7-10)
+
+          // Frequency & Consecutive rules
           if (sameSubject) {
-            const gradeMatch = section.match(/\b(11|12|7|8|9|10)\b/);
-            const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 7;
             if (grade <= 10) overlaps.push('🔴 JHS: Met twice in a day');
             else if (tIn === rEnd || tOut === rStart) overlaps.push('🔴 SHS: Back-to-back same subject');
           }
@@ -854,21 +447,18 @@ function checkRowConflicts(sheet, rowNum) {
     }
   });
 
-  // Add current row duration to daily hrs
-  const dur = (tOut - tIn) / 60;
-  activeDays.forEach(d => dailyHrs[d] += dur);
-
-  let warnings = [];
-  if (overlaps.length > 0) warnings.push(overlaps[0]);
-
+  // Add current row duration to daily hrs and check 6hr hard limit
+  const durHrs = durMins / 60;
   activeDays.forEach(d => {
-    if (dailyHrs[d] > CFG.DAILY_HARD_HOURS) warnings.push('🔴 Over 6h limit');
-    else if (dailyHrs[d] > CFG.DAILY_PREFERRED_HOURS) warnings.push('🟠 Over 4.5h limit');
+      dailyHrs[d] += durHrs;
+      if (dailyHrs[d] > 6.01) provisions.push('🔴 Teacher >6h daily limit');
   });
+
+  let warnings = [...overlaps, ...provisions];
+  warnings = [...new Set(warnings)]; // Dedup
 
   const warnCell = sheet.getRange(rowNum, 12);
   if (warnings.length > 0) {
-    warnings = [...new Set(warnings)]; // Dedup
     const hasError = warnings.some(w => w.includes('🔴'));
     warnCell.setValue(warnings.join(', ')).setFontColor(hasError ? C.error : C.warn).setFontStyle('normal').setFontWeight('bold');
   } else {
@@ -1089,7 +679,7 @@ function updateSectionDropdowns() {
   const subSheet = ss.getSheetByName(CFG.SUBJECT_LOAD);
 
   if (!secSheet) return;
-  const rule = SpreadsheetApp.newDataValidation().requireValueInRange(secSheet.getRange('B3:B1000'), true).build();
+  const rule = SpreadsheetApp.newDataValidation().requireValueInRange(secSheet.getRange('B3:B1000'), true).setAllowInvalid(true).build();
 
   if (subSheet) subSheet.getRange('B3:B1000').setDataValidation(rule);
 
@@ -1110,7 +700,7 @@ function updateTeacherNameDropdowns() {
   const tVals = enrollSheet.getRange('B3:B1000').getValues().flat().filter(String);
   tVals.push('Unavailable Teacher');
   tVals.push('⚠️ Unassigned');
-  const rule = SpreadsheetApp.newDataValidation().requireValueInList(tVals, true).build();
+  const rule = SpreadsheetApp.newDataValidation().requireValueInList(tVals, true).setAllowInvalid(true).build();
 
   if (subSheet) subSheet.getRange('E3:E1000').setDataValidation(rule);
   if (dashSheet) {
@@ -1150,7 +740,7 @@ function buildPhase1Tabs() {
   subSheet.getRange('A3:G1000').setFontColor(C.body).setVerticalAlignment('middle');
   subSheet.getRange('D3:D1000').setNumberFormat('0.0').setHorizontalAlignment('center');
   subSheet.getRange('F3:G1000').setNumberFormat('0.0').setHorizontalAlignment('center');
-  subSheet.getRange('A3:A1000').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setHorizontalAlignment('center');
+  subSheet.getRange('A3:A1000').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).setAllowInvalid(true).build()).setHorizontalAlignment('center');
   subSheet.setFrozenRows(2);
 
   updateSectionDropdowns();
@@ -1224,8 +814,8 @@ function buildPhase4Dashboard() {
   inputBox('C4', C.tealLight).setNumberFormat('0.0 "hrs"').setFontWeight('bold');
   inputBox('E4', C.tealLight).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center');
 
-  dash.getRange('B3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).build()).setValue('ALL WEEK');
-  dash.getRange('B4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setValue(CFG.TERMS[0]);
+  dash.getRange('B3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).setAllowInvalid(true).build()).setValue('ALL WEEK');
+  dash.getRange('B4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).setAllowInvalid(true).build()).setValue(CFG.TERMS[0]);
 
   dash.getRange('A5:I5').setValues([['Subject','Grade Level','Time In','Time Out','MON','TUE','WED','THU','FRI']]).setFontWeight('bold').setFontSize(10).setBackground(C.navy).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
 
@@ -1240,8 +830,8 @@ function buildPhase4Dashboard() {
   inputBox('M4', C.tealLight).setNumberFormat('0.0 "hrs"').setFontWeight('bold');
   inputBox('O4', C.tealLight).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center');
 
-  dash.getRange('L3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).build()).setValue('ALL WEEK');
-  dash.getRange('L4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).build()).setValue(CFG.TERMS[0]);
+  dash.getRange('L3').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ALL WEEK','MON','TUE','WED','THU','FRI'], true).setAllowInvalid(true).build()).setValue('ALL WEEK');
+  dash.getRange('L4').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(CFG.TERMS, true).setAllowInvalid(true).build()).setValue(CFG.TERMS[0]);
 
   dash.getRange('K5:S5').setValues([['Subject','Grade Level','Time In','Time Out','MON','TUE','WED','THU','FRI']]).setFontWeight('bold').setFontSize(10).setBackground(C.teal).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
 
@@ -1261,26 +851,6 @@ function buildPhase4Dashboard() {
 }
 
 
-function buildAIFeedbackWorkspace() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const wsName = 'AI Feedback Workspace';
-  let ws = ss.getSheetByName(wsName) || ss.insertSheet(wsName, 6);
-  ws.clear();
-
-  ws.getRange('A1:B1').setValues([['Proposed Scheduling Rule', 'AI Evaluation']]).setFontWeight('bold').setFontSize(12).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
-  ws.setRowHeight(1, 40);
-
-  ws.setColumnWidth(1, 500);
-  ws.setColumnWidth(2, 500);
-
-  ws.getRange('A2:B2').setWrap(true).setVerticalAlignment('top');
-  ws.setRowHeight(2, 200);
-
-  ws.getRange('A2').setBackground(C.tealLight).setBorder(true, true, true, true, null, null);
-  ws.getRange('B2').setBackground(C.navyLight).setBorder(true, true, true, true, null, null);
-
-  ss.toast('AI Feedback Workspace created.', '✅ Phase 6 Complete', 4);
-}
 
 function buildPhase5ConflictReport() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -1409,7 +979,7 @@ function formatMinsToTime(mins) {
 //  SECTION 10: MASTER SECTION VISUALIZER
 // ══════════════════════════════════════════════════════════════
 
-function buildAllSectionsVisualizer() {
+function buildAllSectionsVisualizer(isMuted = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const visName = '📚 All Sections Schedule';
   let vis = ss.getSheetByName(visName) || ss.insertSheet(visName, 5);
@@ -1431,7 +1001,7 @@ function buildAllSectionsVisualizer() {
   });
 
   if (allRows.length === 0) {
-     return ss.toast('No schedules found in Term tabs to visualize.', '⚠️ Empty', 4);
+     { if (!isMuted) ss.toast('No schedules found in Term tabs to visualize.', '⚠️ Empty', 4); return; }
   }
 
   const sections = [...new Set(allRows.map(r => r[0] ? r[0].toString().trim() : '').filter(String))];
@@ -1509,7 +1079,7 @@ function buildAllSectionsVisualizer() {
       currentRow += outputGrid.length + 2;
   });
 
-  ss.toast('Visualizer generated successfully!', '✅ Done', 4);
+  if (!isMuted) ss.toast('Visualizer generated successfully!', '✅ Done', 4);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1707,4 +1277,92 @@ function buildPDFTemplateSheetAndExport(mode, targetName, rows) {
     if (ts) ss.deleteSheet(ts);
     return 'Error creating PDF: ' + err.toString();
   }
+}
+
+
+function buildAllTeachersVisualizer(isMuted = false) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const visName = '👩‍🏫 All Teachers Schedule';
+  let vis = ss.getSheetByName(visName) || ss.insertSheet(visName, 6);
+  vis.clear();
+
+  vis.getRange('A1:G1').merge().setValue('👩‍🏫 MASTER TEACHERS TIMETABLE VISUALIZER').setFontWeight('bold').setFontSize(14).setBackground(C.navyDark).setFontColor(C.white).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  vis.setRowHeight(1, 46);
+  vis.setColumnWidth(1, 100); vis.setColumnWidth(2, 90); vis.setColumnWidths(3, 5, 140);
+
+  let allRows = [];
+  CFG.TERMS.forEach(term => {
+     const ts = ss.getSheetByName(term);
+     if (!ts) return;
+     const lr = ts.getLastRow();
+     if (lr >= 3) {
+        const rows = ts.getRange(3, 1, lr - 2, 10).getValues();
+        allRows = allRows.concat(rows);
+     }
+  });
+
+  if (allRows.length === 0) return;
+
+  // Get unique valid teachers
+  const teachers = [...new Set(allRows.map(r => r[2] ? r[2].toString().trim() : '').filter(t => t && t !== 'Unavailable Teacher' && t !== '⚠️ Unassigned'))];
+  teachers.sort();
+
+  let currentRow = 3;
+
+  teachers.forEach(teacher => {
+      const tRows = allRows.filter(r => r[2] && r[2].toString().trim() === teacher);
+      if (tRows.length === 0) return;
+
+      vis.getRange(currentRow, 1, 1, 7).merge().setValue('Teacher: ' + teacher).setFontWeight('bold').setFontSize(12).setBackground(C.navy).setFontColor(C.white).setHorizontalAlignment('left').setVerticalAlignment('middle');
+      currentRow++;
+
+      const headers = ['TIME', 'MINS', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY'];
+      vis.getRange(currentRow, 1, 1, 7).setValues([headers]).setFontWeight('bold').setBackground(C.navyLight).setHorizontalAlignment('center').setVerticalAlignment('middle').setBorder(true,true,true,true,true,true);
+      currentRow++;
+
+      const grid = [
+        { t: '7:00-7:30', m: 30, mon: 'Flag Raising', tue: 'Morning Routine', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '7:30-8:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '8:30-9:30', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '9:30-9:45', m: 15, mon: 'RECESS', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '9:45-10:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '10:45-11:45', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '11:45-1:00', m: 75, mon: 'LUNCH BREAK', tue: '', wed: '', thu: '', fri: '', mergeSubj: true },
+        { t: '1:00-2:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '2:00-3:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' },
+        { t: '3:00-4:00', m: 60, mon: '', tue: '', wed: '', thu: '', fri: '' }
+      ];
+
+      let outputGrid = [];
+
+      const getSchedule = (timeStr, dayIndex) => {
+         const [inStr, outStr] = timeStr.split('-');
+         const sStart = parseTime(inStr.includes('AM') || inStr.includes('PM') ? inStr : inStr + (parseInt(inStr.split(':')[0]) < 7 || parseInt(inStr.split(':')[0]) === 12 ? ' PM' : ' AM'));
+         const matched = tRows.find(r => r[3 + dayIndex] === true && Math.abs(parseTime(r[8]) - sStart) < 15);
+         return matched ? matched[1] + '\n(' + matched[0] + ')' : '';
+      };
+
+      grid.forEach(g => {
+         let m = g.mon, t = g.tue, w = g.wed, th = g.thu, f = g.fri;
+         if (!g.mergeSubj) {
+            m = getSchedule(g.t, 0) || m;
+            t = getSchedule(g.t, 1) || t;
+            w = getSchedule(g.t, 2) || w;
+            th = getSchedule(g.t, 3) || th;
+            f = getSchedule(g.t, 4) || f;
+         }
+         outputGrid.push([g.t, g.m, m, t, w, th, f]);
+      });
+
+      vis.getRange(currentRow, 1, outputGrid.length, 7).setValues(outputGrid).setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true).setBorder(true,true,true,true,true,true);
+
+      for (let i = 0; i < grid.length; i++) {
+         const r = currentRow + i;
+         if (grid[i].t === '7:00-7:30') { vis.getRange(r, 4, 1, 4).merge().setBackground('#d9d9d9'); vis.getRange(r, 3).setBackground('#d9d9d9'); }
+         if (grid[i].t === '9:30-9:45') { vis.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+         if (grid[i].t === '11:45-1:00') { vis.getRange(r, 3, 1, 5).merge().setBackground('#d9d9d9'); }
+      }
+
+      currentRow += outputGrid.length + 2;
+  });
 }
