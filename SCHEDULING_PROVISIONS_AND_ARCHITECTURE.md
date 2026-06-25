@@ -2,48 +2,38 @@
 
 This document serves as the strict rulebook and reference map for the Google Apps Script project governing the Autonomous Faculty Loading System. It must be consulted for any future revisions, feature additions, or debugging.
 
-## The Architecture Map (Local CSP Solver)
+## The Architecture Map (Dynamic Background Guide)
 
-The system utilizes a 100% local JavaScript execution environment, relying on an advanced Constraint Satisfaction Problem (CSP) solver with chronological backtracking.
+The system has shifted from a bulk "Auto-Scheduler" approach to a highly interactive, dynamic, and background-synchronized manual encoding environment.
 
-1. **Data Extraction:** The \`runAutoScheduler\` function acts as the central engine. It reads master arrays from:
-   - \`SECTION_ENROLL\`
-   - \`SUBJECT_LOAD\` (which includes the assigned teacher and weekly hours)
-   - \`TEACHER_ENROLL\`
-2. **Variable Ordering & Load Balancing:**
-   - Unassigned subjects (\`⚠️ Unassigned\`) are dynamically mapped to available teachers sharing the same specialization who possess the lowest current load.
-   - High-priority constraints (Homerooms, ARAL) are pre-mapped to the matrix before loop execution.
-3. **Chronological Backtracking Engine:**
-   - The script iterates through a strict timeline. Before a block is committed to the matrix, it undergoes Look-Ahead Validation to ensure its duration (30m, 60m, 90m) does not bleed across physical breaks.
-   - If a constraint is mathematically violated (e.g., Teacher Daily Hard Limit), the engine penalizes the score and recursively attempts the next permutation, advancing the chronological tracker (\`time += 30\`) to force dense packing.
-4. **Data Injection:** The engine maps the solved true/false states into the 13-column Term tab format and utilizes a rapid \`setValues\` injection to render the final schedule.
+1. **Manual Encoding with Dynamic Allowances:** The data validations across all tabs have been modified to \`setAllowInvalid(true)\`. This means the system will strictly validate and warn about rules but will **never physically block** a human encoder from writing data.
+2. **Real-Time Provision Feedback (\`checkRowConflicts\`):** This is the core dynamic guide. Every time a row is edited in a Term tab, this function evaluates the exact limits (Lunch, Recess, durations, ARAL/Homeroom placement, 6-hour max) and instantly outputs actionable error/warning strings into the "Warnings" column.
+3. **Background Dashboard Synchronization:**
+   - Upon any edit to the Term tabs, the system automatically triggers the Master Conflict Checker (\`runConflictChecker\`) in the background.
+   - It also automatically rebuilds the \`buildAllSectionsVisualizer\` and the new \`buildAllTeachersVisualizer\` tabs silently in the background, ensuring all graphical views are instantly updated as the operator encodes.
 
-## The Constraints Ledger
+## The Constraints Ledger (Warnings System)
 
-The Local CSP Engine evaluates the following hard and soft constraints natively inside the \`runAutoScheduler\` logic block:
+The Dynamic Guide natively evaluates and outputs warnings for the following provisions:
 
-- **Lunch Break:** Strictly locked between **11:45 AM - 1:00 PM**. No classes may be scheduled during this block.
-- **Recess Break:** Strictly locked between **9:30 AM - 9:45 AM**. No classes may be scheduled during this block.
-- **ARAL Subject:** Must be strictly plotted exactly at **3:00 PM - 4:00 PM**.
+- **Lunch Break:** Strictly locked between **11:45 AM - 1:00 PM**. Classes bleeding into this generate a \`🔴 Bleeds into Lunch\` error.
+- **Recess Break:** Strictly locked between **9:30 AM - 9:45 AM**. Classes bleeding into this generate a \`🔴 Bleeds into Recess\` error.
+- **ARAL Subject:** Must be strictly plotted exactly at **3:00 PM**.
 - **Block Duration Logic:**
   - **Homeroom:** Exactly **30 minutes**.
   - **Phil Gov (Philippine Politics):** Exactly **90 minutes**.
-  - **Standard Subjects:** Minimum of **60 minutes**. If fractional weekly hours exist (e.g., 2.5 hours), the remainder must utilize a **90-minute** block to bridge the fraction.
+  - **Standard Subjects:** Minimum of **60 minutes**.
 - **Teacher Daily Limits:**
-  - Hard Limit: Maximum of **6 hours** of teaching per day.
-  - Soft Limit: Preferred maximum of **4.5 hours** per day. (If exceeded, the warning \`🟠 >4.5h Soft Limit\` must be flagged).
+  - Hard Limit: Maximum of **6 hours** of teaching per day. Generates a \`🔴 Teacher >6h daily limit\` error.
 - **Junior High School (JHS / G7-10) Rules:**
-  - Sections **cannot** meet the same subject twice in one day.
-  - The Homeroom Adviser **cannot** be booked/conflict during the section's other scheduled classes.
+  - Sections **cannot** meet the same subject twice in one day. (\`🔴 JHS: Met twice in a day\`)
+  - Homeroom must be on Monday at **7:30 AM**. (\`🟠 JHS Homeroom should be Mon 7:30 AM\`)
 - **Senior High School (SHS / G11-12) Rules:**
-  - Sections **can** meet the same subject twice in one day.
-  - However, the identical subjects **cannot be consecutive** (no back-to-back blocks).
-  - Homeroom is strictly plotted at **3:00 PM**.
+  - Identical subjects **cannot be consecutive** (no back-to-back blocks). (\`🔴 SHS: Back-to-back same subject\`)
+  - Homeroom is strictly plotted at **3:00 PM**. (\`🟠 SHS Homeroom should be 3:00 PM\`)
 
 ## ⚠️ Isolation Protocol
 
-**The dashboards (Teacher and Section), the All Sections Visualizer, the manual Conflict Checkers (\`onEdit\`), and the PDF Generation scripts are container-bound UI elements.**
+**The dashboards (Teacher and Section), the All Sections/Teachers Visualizers, and the PDF Generation scripts are container-bound UI elements.**
 
-**DO NOT ALTER THESE FUNCTIONS WHEN TWEAKING THE \`runAutoScheduler\` CSP ENGINE.**
-
-The UI elements depend on the final 13-column output structure of the Term tabs. As long as the solver accurately populates those columns via \`setValues\`, the visualizers and checkers will function autonomously.
+These elements are designed to run autonomously and silently in the background. DO NOT break their structural loop or the \`onEdit\` trigger mechanisms.
